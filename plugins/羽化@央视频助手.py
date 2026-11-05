@@ -11,7 +11,7 @@
 # [rule: ^央视频帮助$]
 # [title: 央视频助手]
 # [author: 羽化]
-# [version: 1.0.2]
+# [version: 1.0.3]
 # [description: 央视频扫码登录(自动写青龙变量+绑定QQ) + 抽奖查询 + 状态]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -112,7 +112,7 @@ def set_cfg(key, value):
         pass
     if _MW is not None:
         try:
-            _MW.bucketSet(BUCKET, "ysp." + key, str(value))
+            _MW.bucketSet(BUCKET, key, str(value))
         except Exception:
             pass
 
@@ -418,9 +418,8 @@ async def do_login(uid, plat):
         await asyncio.sleep(2)
         try:
             st = _state()
-            if not st.get("waiting_qr"):
-                await reply("已取消等待。")
-                return
+            if not st.get("uid"):
+                return          # waiting_qr 被 q 清空 → 静默退出（q 那边已回复）
         except Exception:
             pass
         try:
@@ -689,9 +688,9 @@ async def main():
 
     if content.lower() == "q":
         st = _state()
-        if st.get("waiting_qr"):
+        if st.get("uid"):
             set_cfg("waiting_qr", "{}")
-            await reply("已取消等待。")
+            await reply("已取消央视频扫码等待。")
         return
 
     if content in ("央视频菜单", "央视频帮助"):

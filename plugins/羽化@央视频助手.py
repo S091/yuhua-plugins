@@ -10,10 +10,11 @@
 # [rule: ^央视频解绑( .+)?$]
 # [rule: ^央视频清理( .+)?$]
 # [rule: ^央视频菜单$]
+# [rule: ?]
 # [rule: ^央视频帮助$]
 # [title: 央视频助手]
 # [author: 羽化]
-# [version: 2.0.0]
+# [version: 2.1.1]
 # [description: 央视频扫码登录(自动写青龙变量+绑定QQ) + 抽奖查询 + 状态]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -654,33 +655,59 @@ async def do_login(uid, plat):
         await reply("❌ 扫码成功但换票失败：%s" % e)
         return
 
-    # ★ 写青龙变量（多账号合并，不覆盖）
-    var = cfg("ql_var_name") or "YSP_COOKIE"
+    # ★★ 扫码成功：先进入「备注态」，暂不写青龙（备注完才推）
+    set_cfg("waiting_qr", "{}")     # 扫码等待结束
     vuid = ck_uid(ck) or ("q%s" % str(uid))
+    _set_remark_state({"uid": str(uid), "plat": plat, "ck": ck,
+                       "vuid": vuid, "qid": qid, "ts": time.time()})
+    await reply(REMARK_HINT, recall=False)
+
+
+def _state():
+    """扫码等待态 waiting_qr（内容对象 {uid,plat,qid,guid,ts}）"""
+    try:
+        return json.loads(cfg("waiting_qr") or "{}")
+    except Exception:
+        return {}
+
+
+def _remark_state():
+    """备注等待态 waiting_remark：{uid, plat, ck, vuid, qid, ts}"""
+    try:
+        return json.loads(cfg("waiting_remark") or "{}")
+    except Exception:
+        return {}
+
+
+def _set_remark_state(d):
+    set_cfg("waiting_remark", json.dumps(d or {}, ensure_ascii=False))
+
+
+async def finalize_login(uid, plat, ck, vuid, qid, remark):
+    """★ 备注确定后才调用：合并写青龙 YSP_COOKIE + 绑定 + 触发积分任务。"""
+    var = cfg("ql_var_name") or "YSP_COOKIE"
     act, eid, r, total = "?", None, {}, 0
     try:
         (act, eid, r), total = await asyncio.to_thread(ql_merge_cookie, ck, vuid, uid)
     except Exception as e:
-        await reply("⚠️ CK 已拿到但写青龙变量失败：%s\n（可手动复制，见下条）" % e)
+        await reply("⚠️ CK 已拿到但写青龙变量失败：%s" % e, recall=False)
 
-    # ★ 绑定到扫码人 QQ（一人可挂多个账号）
+    # 绑定（备注用本次确定的 remark）
     m = get_map()
-    is_new = add_account(m, uid, vuid, ck, str(uid))
-    set_cfg("waiting_qr", "{}")
+    add_account(m, uid, vuid, ck, remark or str(uid))
     cnt = len(my_accounts(m, uid))
 
     await reply(
         "✅ 央视频登录成功\n"
-        "🔄 票据类型：logintype=140 + appid=%s（App 家族票，可自动续期）\n"
+        "🏷 备注：%s\n"
         "🟢 已合并写入青龙变量：%s（%s，现共 %d 个账号）\n"
         "🔗 已绑定到你的 QQ：你现在共绑定 %d 个央视频账号\n"
-        "   发「央视频状态」可查看，发「央视频抽奖」会汇总你的所有账号\n"
-        "%s" % (qid[:8] + "…", var, act, total, cnt,
+        "%s" % (remark or str(uid), var, act, total, cnt,
                 ("（变量ID %s）" % eid) if eid else ""),
         recall=False,
     )
 
-    # ★ 登录成功 → 后台启用并跑一次，不在这里发日志（用户要求：扫码后只提示稍后查询）
+    # 后台启用 + 跑一次（不刷日志）
     try:
         tid = int(cfg("task_id") or "2341")
     except Exception:
@@ -694,14 +721,63 @@ async def do_login(uid, plat):
             recall=False,
         )
     except Exception as e:
-        await reply("⚠️ 积分任务触发失败：%s\n（可到青龙面板手动运行 ID %s）" % (e, tid))
+        await reply("⚠️ 积分任务触发失败：%s\n（可到青龙面板手动运行 ID %s）" % (e, tid), recall=False)
 
 
-def _state():
+REMARK_HINT = (
+    "✅ 扫码成功！先给这个账号起个备注吧\n"
+    "· 直接回复备注名（如「我的主号」「我妈的号」）\n"
+    "· 不想起名：发「回车 / 空白」即可，默认用你的 QQ 号\n"
+    "· 回复 q 取消本次登录（CK 不会写入青龙）\n"
+    "（备注确定后才会写入青龙并跑积分任务）"
+)
+
+
+REMARK_TIMEOUT = 90   # 秒；没回备注就默认 QQ 号自动落地
+
+
+def cron_remark_timeout():
+    """cron(fake) 触发时调用：残留备注态超过 REMARK_TIMEOUT 秒 → 自动默认QQ号 finalize。
+
+    用 asyncio.run 跑一遍 finalize_login（同步上下文里唯一的 async 调用点）。
+    """
+    rst = _remark_state()
+    if not rst or not rst.get("uid"):
+        return
+    if time.time() - float(rst.get("ts") or 0) < REMARK_TIMEOUT:
+        return
+    uid = str(rst.get("uid"))
+    plat = rst.get("plat") or "qq"
+    ck = rst.get("ck", "")
+    vuid = rst.get("vuid", "")
+    qid = rst.get("qid", "")
+    _set_remark_state({})   # 先清，防止并发 cron 重复 finalize
+    # cron(fake) 里 sender 不可用，不调 reply；只做「落地」：写青龙 + 绑定
     try:
-        return json.loads(cfg("waiting_qr") or "{}")
+        ql_merge_cookie(ck, vuid, uid)
+        m = get_map()
+        add_account(m, uid, vuid, ck, uid)   # 备注默认 QQ 号
     except Exception:
-        return {}
+        pass
+
+
+async def handle_remark(uid, plat, content):
+    """备注态下的任意消息分发：q 取消 / 空=默认QQ / 文字=备注 → 都 finalize。"""
+    rst = _remark_state()
+    if not rst or str(rst.get("uid")) != str(uid):
+        return False   # 不是本人的备注态 → 不处理
+    # q：全局退出，清状态，不写青龙
+    if str(content).strip().lower() == "q":
+        _set_remark_state({})
+        await reply("已取消央视频登录（本次 CK 未写入青龙）。", recall=False)
+        return True
+    # 空/回车/两行空白 → 默认 QQ 号
+    txt = str(content).strip()
+    remark = txt if txt else str(uid)
+    _set_remark_state({})
+    await finalize_login(uid, plat, rst.get("ck", ""), rst.get("vuid", ""),
+                         rst.get("qid", ""), remark)
+    return True
 
 
 async def do_status(uid, plat):
@@ -1048,15 +1124,29 @@ async def main():
         plat = str(await _get(sender.getPlatform) or "")
     except Exception:
         return
-    if not content:
-        return  # cron 触发，不做任何事（本插件无定时任务）
+    # ★ cron 触发是假 sender（plat=="fake"），必须最先挡掉，
+    #   否则每分钟的空消息会误触发残留的备注态 → 误推青龙
+    if plat == "fake":
+        try:
+            await asyncio.to_thread(cron_remark_timeout)
+        except Exception:
+            pass
+        return
 
-    if content.lower() == "q":
+    # ★★ 备注态：任意消息(含空/回车)交给 handle_remark 优先处理
+    #    q=取消 / 空=默认QQ号 / 文字=备注 → 确定后才写青龙
+    if await handle_remark(uid, plat, content):
+        return
+
+    # 扫码等待期的 q → 全局取消（莹莹棒也会回一条，这里只清自己的状态，不重复回文字）
+    if str(content).strip().lower() == "q":
         st = _state()
         if st.get("uid"):
             set_cfg("waiting_qr", "{}")
-            await reply("已取消央视频扫码等待。")
         return
+
+    if not content:
+        return  # 非备注态的真实空消息(回车)静默，不抢答
 
     if content in ("央视频菜单", "央视频帮助"):
         await do_menu(uid, plat)

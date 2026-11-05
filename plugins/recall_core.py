@@ -21,7 +21,8 @@
         return
 
 共享配置（bucket 由调用方决定，本机用 yyb_bind）：
-    recall_minutes   普通消息 N 分钟后撤回，0=关闭，默认 1
+    recall_seconds   普通消息 N 秒后撤回，0=关闭，默认 60
+    recall_minutes   旧键（分钟），没有 recall_seconds 时按它×60 兼容
     qr_recall        登录二维码是否跟着撤回，0=不撤（默认）/ 1=撤
 
 队列文件 /data/plugins/.recall_queue.json（跨插件共享）
@@ -79,6 +80,25 @@ def stats():
 
 
 # ---------------- 配置判断 ----------------
+def get_seconds(get_cfg):
+    """撤回延迟秒数。
+
+    优先读 recall_seconds（新，秒级）；没有则回退 recall_minutes × 60（旧，分钟级）。
+    两者都没有 → 60 秒。
+    """
+    try:
+        v = get_cfg("recall_seconds")
+        if v not in (None, ""):
+            return float(v)
+    except Exception:
+        pass
+    try:
+        return float(get_cfg("recall_minutes") or "1") * 60
+    except Exception:
+        return 60.0
+
+
+
 def should_recall(get_cfg, kind="normal"):
     """这类消息该不该撤回"""
     if str(kind) == "never":
@@ -86,7 +106,7 @@ def should_recall(get_cfg, kind="normal"):
     try:
         if str(kind) == "qr":
             return str(get_cfg("qr_recall") or "0") == "1"
-        return float(get_cfg("recall_minutes") or "1") > 0
+        return get_seconds(get_cfg) > 0
     except Exception:
         return False
 
@@ -97,10 +117,7 @@ def cron_recall(get_cfg, delete_fn, log_fn=None):
 
     返回实际撤回条数。
     """
-    try:
-        minutes = float(get_cfg("recall_minutes") or "1")
-    except Exception:
-        minutes = 1.0
+    seconds = get_seconds(get_cfg)
     q = _load()
     if not q:
         return 0
@@ -123,11 +140,11 @@ def cron_recall(get_cfg, delete_fn, log_fn=None):
             dropped += 1
             continue
         # 普通消息：总开关关着就丢弃
-        if kind == "normal" and minutes <= 0:
+        if kind == "normal" and seconds <= 0:
             dropped += 1
             continue
         # 还没到时间
-        if age < minutes * 60:
+        if age < seconds:
             keep.append(it)
             continue
         # 超窗放弃（二维码不限，普通按 QQ 2 分钟硬窗口）
@@ -177,18 +194,19 @@ def handle_command(content, uid, get_cfg, is_admin, set_cfg=None):
             "会跟随自动撤回" if arg == "1" else "不撤回（推荐，方便慢慢扫）")
 
     if not arg.isdigit():
-        return "格式：设置撤回 1\n（分钟，填 0 关闭；掉线通知永远不撤回）"
+        return ("格式：设置撤回 60\n（单位：秒，填 0 关闭；QQ 上限约 120 秒）")
+    sec = int(arg)
     if set_cfg:
-        set_cfg("recall_minutes", arg)
+        set_cfg("recall_seconds", str(sec))
     warn = ""
-    if int(arg) > 2:
-        warn = "\n⚠️ 注意：QQ 撤回上限是 2 分钟，设超过 2 分钟会撤不回来（实测 185 秒失败）"
-    return "✅ 消息自动撤回已设为 %s 分钟%s%s" % (
-        arg, "（已关闭）" if arg == "0" else "", warn)
+    if sec > 120:
+        warn = "\n⚠️ QQ 撤回上限约 120 秒，设更大撤不回来（实测 185 秒失败）"
+    return "✅ 消息自动撤回已设为 %s 秒%s%s" % (
+        sec, "（已关闭）" if sec == 0 else "", warn)
 
 
 # ---------------- 帮助 ----------------
 HELP_LINES = [
-    "设置撤回 1           普通消息 N 分钟后撤回（0=关，QQ 上限 2 分钟）",
+    "设置撤回 60          普通消息 N 秒后撤回（0=关，QQ 上限约 120 秒）",
     "设置二维码撤回 0     登录二维码是否跟着撤回（0=不撤，默认）",
 ]

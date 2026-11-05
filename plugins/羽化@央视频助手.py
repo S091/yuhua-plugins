@@ -8,11 +8,12 @@
 # [rule: ^央视频抽$]
 # [rule: ^央视频备注( .+)?$]
 # [rule: ^央视频解绑( .+)?$]
+# [rule: ^央视频清理( .+)?$]
 # [rule: ^央视频菜单$]
 # [rule: ^央视频帮助$]
 # [title: 央视频助手]
 # [author: 羽化]
-# [version: 1.4.2]
+# [version: 2.0.0]
 # [description: 央视频扫码登录(自动写青龙变量+绑定QQ) + 抽奖查询 + 状态]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -127,16 +128,87 @@ def set_cfg(key, value):
             pass
 
 
+def _migrate_map(raw):
+    """旧格式 {QQ:{vuserid,ck,remark,ts}} → 新格式 {QQ:{"accounts":{vuid:{...}}}}"""
+    out = {}
+    for qq, rec in (raw or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        if "accounts" in rec and isinstance(rec["accounts"], dict):
+            out[str(qq)] = rec
+            continue
+        vuid = str(rec.get("vuserid") or "")
+        if not vuid:
+            continue
+        out[str(qq)] = {"accounts": {
+            vuid: {"ck": rec.get("ck") or "", "remark": rec.get("remark") or str(qq),
+                   "ts": rec.get("ts") or 0, "vuserid": vuid}
+        }}
+    return out
+
+
 def get_map():
+    """返回规范化后的绑定表：{QQ: {"accounts": {vuid: {ck,remark,ts,vuserid}}}}"""
     try:
-        m = json.loads(cfg("map") or "{}")
-        return m if isinstance(m, dict) else {}
+        raw = json.loads(cfg("map") or "{}")
+        if not isinstance(raw, dict):
+            return {}
+        return _migrate_map(raw)
     except Exception:
         return {}
 
 
 def set_map(m):
     set_cfg("map", json.dumps(m, ensure_ascii=False))
+
+
+def my_accounts(m, uid):
+    """取某 QQ 名下所有账号 → [(vuid, rec), ...]"""
+    node = m.get(str(uid)) or {}
+    accs = node.get("accounts") or {}
+    return sorted(accs.items(), key=lambda x: str(x[0]))
+
+
+def all_accounts(m):
+    """全部账号逐条展开 → [(qq, vuid, rec), ...]"""
+    out = []
+    for qq, node in m.items():
+        for vuid, rec in (node.get("accounts") or {}).items():
+            out.append((str(qq), str(vuid), rec))
+    return out
+
+
+def add_account(m, uid, vuid, ck, remark):
+    """绑定/更新一个账号（同 vuid 覆盖，不同 vuid 追加）"""
+    node = m.setdefault(str(uid), {"accounts": {}})
+    accs = node.setdefault("accounts", {})
+    old = accs.get(str(vuid)) if str(vuid) in accs else None
+    # 保留旧备注（若用户自己改过）
+    if old and old.get("remark") and old.get("remark") != str(uid):
+        remark = old["remark"]
+    accs[str(vuid)] = {"ck": ck, "remark": remark or str(uid),
+                       "ts": int(time.time()), "vuserid": str(vuid)}
+    set_map(m)
+    return old is None
+
+
+def del_accounts(m, uid, vuids=None):
+    """删除某 QQ 的账号；vuids 为空=全删。返回被删的 vuserid 列表"""
+    node = m.get(str(uid))
+    if not node:
+        return []
+    accs = node.get("accounts") or {}
+    if vuids:
+        killed = [v for v in vuids if v in accs]
+        for v in killed:
+            accs.pop(v, None)
+    else:
+        killed = list(accs.keys())
+        accs.clear()
+    if not accs:
+        m.pop(str(uid), None)
+    set_map(m)
+    return killed
 
 
 def _is_admin(uid):
@@ -342,6 +414,70 @@ def ql_set_var(name, value):
     return "created", eid, r
 
 
+def ql_merge_cookie(newck, vuid, tag):
+    """把 newck 合并进 YSP_COOKIE（多行 名#cookie），按 vuserid 去重。
+
+    ysp.py 的 parse_accounts 支持换行分隔、每行 `名#cookie`；
+    同一 vuserid 重新扫码 = 替换该行，不同 vuserid = 追加一行。
+    tag 用绑定人 QQ，日志段标记 [x/y QQ] 才能和绑定表对应。
+    """
+    var = cfg("ql_var_name") or "YSP_COOKIE"
+    raw = ql_get_var(var) or ""
+    lines, hit = [], False
+    for ln in str(raw).splitlines():
+        ln = ln.strip().strip(",;")
+        if not ln:
+            continue
+        # 拆 名#cookie
+        if "#" in ln and "=" not in ln.split("#", 1)[0]:
+            name, ck = ln.split("#", 1)
+        else:
+            name, ck = "", ln
+        # 该行 vuserid
+        old_vuid = ""
+        for seg in str(ck).replace("\n", ";").split(";"):
+            seg = seg.strip()
+            if seg.startswith("vuserid="):
+                old_vuid = seg.split("=", 1)[1]
+                break
+        if not hit and (old_vuid == str(vuid) or (name == str(tag) and old_vuid == "")):
+            lines.append("%s#%s" % (tag, newck))
+            hit = True
+        else:
+            lines.append("%s#%s" % (name or tag, ck))
+    if not hit:
+        lines.append("%s#%s" % (tag, newck))
+    value = "\n".join(lines)
+    return ql_set_var(var, value), len(lines)
+
+
+def ql_remove_cookie(vuids):
+    """从 YSP_COOKIE 删掉指定 vuserid 的整行，其余保留。返回删了几行。"""
+    var = cfg("ql_var_name") or "YSP_COOKIE"
+    raw = ql_get_var(var) or ""
+    killed, kept = 0, []
+    for ln in str(raw).splitlines():
+        ln = ln.strip().strip(",;")
+        if not ln:
+            continue
+        if "#" in ln and "=" not in ln.split("#", 1)[0]:
+            name, ck = ln.split("#", 1)
+        else:
+            name, ck = "", ln
+        old_vuid = ""
+        for seg in str(ck).replace("\n", ";").split(";"):
+            seg = seg.strip()
+            if seg.startswith("vuserid="):
+                old_vuid = seg.split("=", 1)[1]
+                break
+        if old_vuid and str(old_vuid) in [str(v) for v in vuids]:
+            killed += 1
+        else:
+            kept.append("%s#%s" % (name or "账号", ck))
+    ql_set_var(var, "\n".join(kept))
+    return killed
+
+
 def ql_get_var(name):
     """读青龙环境变量值（读不到返回空串）"""
     try:
@@ -518,31 +654,29 @@ async def do_login(uid, plat):
         await reply("❌ 扫码成功但换票失败：%s" % e)
         return
 
-    # 写青龙变量
-    var = cfg("ql_var_name") or "ysp"
-    act, eid, r = "?", None, {}
+    # ★ 写青龙变量（多账号合并，不覆盖）
+    var = cfg("ql_var_name") or "YSP_COOKIE"
+    vuid = ck_uid(ck) or ("q%s" % str(uid))
+    act, eid, r, total = "?", None, {}, 0
     try:
-        act, eid, r = await asyncio.to_thread(ql_set_var, var, ck)
+        (act, eid, r), total = await asyncio.to_thread(ql_merge_cookie, ck, vuid, uid)
     except Exception as e:
         await reply("⚠️ CK 已拿到但写青龙变量失败：%s\n（可手动复制，见下条）" % e)
 
-    # 绑定到扫码人 QQ
+    # ★ 绑定到扫码人 QQ（一人可挂多个账号）
     m = get_map()
-    vuid = ck_uid(ck)
-    _old = m.get(str(uid)) or {}
-    m[str(uid)] = {"nick": "央视频%s" % (vuid[-6:] if vuid else "user"), "vuserid": vuid,
-                   "ck": ck, "ts": int(time.time()),
-                   # ★ 备注默认就是 QQ 号；重新扫码时保留用户自己改过的备注
-                   "remark": _old.get("remark") or str(uid)}
-    set_map(m)
+    is_new = add_account(m, uid, vuid, ck, str(uid))
     set_cfg("waiting_qr", "{}")
+    cnt = len(my_accounts(m, uid))
 
     await reply(
         "✅ 央视频登录成功\n"
         "🔄 票据类型：logintype=140 + appid=%s（App 家族票，可自动续期）\n"
-        "🟢 已写入青龙变量：%s（%s）\n"
-        "🔗 已绑定到你的 QQ：以后「央视频抽奖/状态」操作的就是这个号\n"
-        "%s" % (qid[:8] + "…", var, act, ("（变量ID %s）" % eid) if eid else ""),
+        "🟢 已合并写入青龙变量：%s（%s，现共 %d 个账号）\n"
+        "🔗 已绑定到你的 QQ：你现在共绑定 %d 个央视频账号\n"
+        "   发「央视频状态」可查看，发「央视频抽奖」会汇总你的所有账号\n"
+        "%s" % (qid[:8] + "…", var, act, total, cnt,
+                ("（变量ID %s）" % eid) if eid else ""),
         recall=False,
     )
 
@@ -571,123 +705,83 @@ def _state():
 
 
 async def do_status(uid, plat):
+    """管理员=总览全部账号；普通用户=看自己名下所有账号（多账号）。"""
     m = get_map()
 
-    # ★ 管理员：默认总览所有绑定账号（不只看自己）
+    def _lot_hint(vuid):
+        lot = lot_today(vuid)
+        if lot:
+            return "有记录 " + time.strftime("%H:%M", time.localtime(lot.get("ts") or 0))
+        # 回退读青龙全局变量（单账号兼容）
+        try:
+            raw = ql_get_var("YSP_LAST_LOTTERY") or ""
+            if str(raw).startswith(time.strftime("%Y-%m-%d")):
+                p = str(raw).split("|")
+                if len(p) >= 2 and "次：" in p[1]:
+                    return "有记录(全局)"
+        except Exception:
+            pass
+        return "未抽"
+
     if _is_admin(uid):
-        if not m:
-            await reply("【央视频账号总览】\n目前没有任何绑定账号。\n发「央视频登录」扫码绑定。", recall=False)
+        accs = all_accounts(m)
+        if not accs:
+            await reply("【央视频账号总览】\n目前没有任何绑定账号。", recall=False)
             return
-        blocks = ["【央视频账号总览】共 %d 个账号（管理员视角）" % len(m)]
-        for qq in sorted(m.keys()):
-            rec = m.get(qq) or {}
-            vuid = rec.get("vuserid") or "?"
-            lot = lot_today(vuid)
-            # 本地没记录时回退看青龙变量（全局结果，单账号场景准确）
-            if not lot:
-                try:
-                    _raw = await asyncio.to_thread(ql_get_var, "YSP_LAST_LOTTERY")
-                    if _raw and str(_raw).startswith(time.strftime("%Y-%m-%d")):
-                        _p = str(_raw).split("|")
-                        if len(_p) >= 2 and "次：" in _p[1]:
-                            lot = {"ts": time.time(), "text": _p[1]}
-                except Exception:
-                    pass
+        blocks = ["【央视频账号总览】共 %d 个账号 / %d 人（管理员视角）" % (len(accs), len(m))]
+        for qq, vuid, rec in accs:
             blocks.append(
-                "· %s（QQ %s）\n  vuserid：%s\n  今日抽奖：%s\n  绑定时间：%s" % (
-                    rec.get("remark") or qq, qq, vuid,
-                    (("有记录 " + time.strftime("%H:%M", time.localtime(lot.get("ts") or 0))) if lot else "未抽"),
+                "· %s（QQ %s）\n  vuserid：%s\n  今日抽奖：%s\n  绑定：%s" % (
+                    rec.get("remark") or qq, qq, vuid, _lot_hint(vuid),
                     time.strftime("%m-%d %H:%M", time.localtime(rec.get("ts") or 0))))
         await reply("\n\n".join(blocks), recall=False)
         return
 
-    # 普通用户：只看自己
-    rec = m.get(str(uid))
-    if not rec:
-        await reply("你还没有绑定央视频账号。\n发「央视频登录」扫码绑定。")
+    mine = my_accounts(m, uid)
+    if not mine:
+        await reply("你还没有绑定央视频账号。\n发「央视频登录」扫码绑定。", recall=False)
         return
-    lot = lot_today(rec.get("vuserid") or str(uid))
-    lines = [
-        "【央视频账号状态】",
-        "· 绑定 QQ：%s" % uid,
-        "· 备注：%s%s" % (rec.get("remark") or uid,
-                          "" if rec.get("remark") else "（默认QQ号，发「央视频备注 名字」可改）"),
-        "· vuserid：%s" % (rec.get("vuserid") or "?"),
-        "· 绑定时间：%s" % time.strftime("%Y-%m-%d %H:%M", time.localtime(rec.get("ts") or 0)),
-        "· CK：%s…（%d 字符）" % ((rec.get("ck") or "")[:40], len(rec.get("ck") or "")),
-        "· 今日抽奖：%s" % (("已抽（%s）" % (lot.get("text") or "")[:60]) if lot else "未抽"),
-    ]
-    await reply("\n".join(lines), recall=False)
+    blocks = ["【央视频账号状态】你共绑定 %d 个账号" % len(mine)]
+    for vuid, rec in mine:
+        blocks.append(
+            "· 备注：%s\n  vuserid：%s\n  今日抽奖：%s\n  CK：%d 字符\n  绑定：%s" % (
+                rec.get("remark") or vuid, vuid, _lot_hint(vuid),
+                len(rec.get("ck") or ""),
+                time.strftime("%m-%d %H:%M", time.localtime(rec.get("ts") or 0))))
+    await reply("\n\n".join(blocks), recall=False)
 
 
 def _filter_own_lines(log, vuserid):
     """从任务日志里只提取属于本账号的抽奖/积分行。
-
-    单账号：日志里没有 '账号N' 分段标记 → 直接返回抽奖相关行。
-    多账号：青龙日志按 '[x/y 账号N]' 分段，找到含本 vuserid 的段，只取该段。
+    多账号日志按 '[x/y 标签]' 分段，标签=绑定QQ；本插件写入时标签就是 QQ。
     """
     try:
         lines = [ln for ln in str(log or "").split("\n") if ln.strip()]
         if not lines:
             return []
-        # 找分段标记
-        seg_idx = [i for i, ln in enumerate(lines) if "账号" in ln and "][" in ln]
+        seg_idx = [i for i, ln in enumerate(lines) if "账号" in ln and "][/" in ln.replace("[", "")]
+        # 更稳：匹配 [数字/数字 xxx]
+        seg_idx = [i for i, ln in enumerate(lines) if re.search(r"\[\d+/\d+ ", ln)]
         if len(seg_idx) <= 1:
             return extract_lottery(log)          # 单账号：全归他
-        # 多账号：逐段判断哪个段属于本账号
         bounds = seg_idx + [len(lines)]
         for k in range(len(seg_idx)):
-            seg = lines[bounds[k]:bounds[k + 1]]
-            seg_text = "\n".join(seg)
+            seg_text = "\n".join(lines[bounds[k]:bounds[k + 1]])
             if vuserid and str(vuserid) in seg_text:
                 return extract_lottery(seg_text)
-        # 日志里没有 vuserid 字样 → 保守起见只返回第一段（通常就是触发者自己的）
         return extract_lottery("\n".join(lines[bounds[0]:bounds[1]]))
     except Exception:
         return extract_lottery(log)
 
 
-async def do_lottery(uid, plat):
-    m = get_map()
-
-    # ★ 管理员：默认汇总所有绑定账号的今日结果
-    if _is_admin(uid) and m:
-        blocks = ["【央视频抽奖 · 全部账号】共 %d 个（管理员视角）" % len(m)]
-        has_any = False
-        for qq in sorted(m.keys()):
-            rec = m.get(qq) or {}
-            vuid = rec.get("vuserid") or qq
-            hit = lot_today(vuid)
-            if hit:
-                has_any = True
-                blocks.append("· %s（QQ %s）\n%s" % (rec.get("remark") or qq, qq,
-                                                     hit.get("text") or "（无详细记录）"))
-            else:
-                blocks.append("· %s（QQ %s）\n（今日无记录）" % (rec.get("remark") or qq, qq))
-        if has_any:
-            await reply("\n\n".join(blocks), recall=False)
-            return
-        # 全都没有 → 继续走"触发一次"的流程（用主账号的 key 记录）
-        await reply("\n\n".join(blocks) + "\n\n今天还没有任何账号跑过，正在触发一次…", recall=False)
-
-    rec = m.get(str(uid))
-    if not rec:
-        if _is_admin(uid):
-            rec = {"vuserid": ""}         # 管理员没绑也能触发
-        else:
-            await reply("你还没有绑定央视频账号。\n先发「央视频登录」扫码绑定，再来抽奖。")
-            return
-    key = rec.get("vuserid") or str(uid)
-
-    # ① ★ 优先读青龙变量 YSP_LAST_LOTTERY（ysp.py 每次跑完写入，不受"最新日志"限制）
-    #    格式: 2026-11-06 01:59|抽奖 3 次：xxx、yyy|45→55
+def _global_lottery_text():
+    """读青龙 YSP_LAST_LOTTERY → 结构化文本（今天）"""
     try:
-        raw = await asyncio.to_thread(ql_get_var, "YSP_LAST_LOTTERY")
-        if raw and raw.startswith(time.strftime("%Y-%m-%d")):
+        raw = ql_get_var("YSP_LAST_LOTTERY") or ""
+        if raw and str(raw).startswith(time.strftime("%Y-%m-%d")):
             parts = str(raw).split("|")
             if len(parts) >= 2 and parts[1].strip():
-                when = parts[0].strip()
-                result = parts[1].strip()
+                when, result = parts[0].strip(), parts[1].strip()
                 pts = parts[2].strip() if len(parts) > 2 else ""
                 text = "🎁 %s" % result
                 if pts and "→" in pts:
@@ -695,57 +789,71 @@ async def do_lottery(uid, plat):
                     text += "\n💰 积分 %s → %s" % (a.strip(), b.strip())
                 if "次：" in result:
                     text += LOT_TIP
-                lot_set(key, text)
-                await reply(
-                    "【央视频抽奖 · 今日结果】\n%s\n\n时间：%s\n（今天已经跑过了，不会重复跑）" % (text, when),
-                    recall=False,
-                )
-                return
+                return text, when
     except Exception:
         pass
+    return None, None
 
-    # ② 插件自己记录过今天的结果 → 直接返回，不跑任务
-    hit = lot_today(key)
-    if hit:
-        _ht = hit.get("text") or "（无详细记录）"
-        if "次：" in _ht and LOT_TIP.strip() not in _ht:
-            _ht += LOT_TIP
-        await reply(
-            "【央视频抽奖 · 今日结果】\n"
-            "%s\n"
-            "（今天 %s 跑的，不会重复跑）" % (_ht,
-                                        time.strftime("%H:%M", time.localtime(hit.get("ts") or 0))),
-            recall=False,
-        )
+
+async def do_lottery(uid, plat):
+    """先查今天有没有跑过(全局按账号读日志/变量)，有就汇总结果，不重复触发。"""
+    m = get_map()
+    is_adm = _is_admin(uid)
+    mine = my_accounts(m, uid)
+
+    # ① 优先：青龙变量里有今天的结果 → 按范围汇总返回
+    gtext, when = await asyncio.to_thread(_global_lottery_text)
+    if gtext:
+        if is_adm:
+            accs = all_accounts(m)
+            blocks = ["【央视频抽奖 · 全部账号】共 %d 个（管理员视角）" % len(accs)]
+            for qq, vuid, rec in accs:
+                blocks.append("· %s（QQ %s / %s）\n%s" % (
+                    rec.get("remark") or qq, qq, vuid[:8], gtext))
+            await reply("\n\n".join(blocks) + "\n\n时间：%s\n（今天已跑过，不重复跑）" % when, recall=False)
+        else:
+            if not mine:
+                await reply("你还没有绑定央视频账号。\n先发「央视频登录」扫码绑定。", recall=False)
+                return
+            blocks = ["【央视频抽奖 · 我的账号】共 %d 个" % len(mine)]
+            for vuid, rec in mine:
+                blocks.append("· %s（%s）\n%s" % (rec.get("remark") or vuid, vuid[:8], gtext))
+            await reply("\n\n".join(blocks) + "\n\n时间：%s\n（今天已跑过，不重复跑）" % when, recall=False)
         return
 
+    # ② 青龙最新日志是今天跑的 → 按账号段提取
     task_id = cfg("task_id") or "2341"
-
-    # ② 先读青龙「最新一次」日志：如果是今天跑的，直接给结果，不重复触发
     log = ""
     try:
         log = await asyncio.to_thread(ql_task_log, task_id)
     except Exception:
-        log = ""
+        pass
     if log and _log_is_today(log, time.strftime("%Y-%m-%d")):
-        picked = _filter_own_lines(log, key)
+        # 逐个账号提取（多账号日志分段）
+        if is_adm:
+            targets = all_accounts(m)
+        else:
+            targets = [(str(uid), v, r) for v, r in mine]
+        if targets:
+            blocks = ["【央视频抽奖 · 今日结果】"]
+            for qq, vuid, rec in targets:
+                picked = _filter_own_lines(log, vuid)
+                txt = "\n".join(picked) if picked else "（本次无抽奖记录）"
+                if any("次：" in x for x in picked):
+                    txt += LOT_TIP
+                blocks.append("· %s（%s）\n%s" % (rec.get("remark") or qq, vuid[:8], txt))
+            await reply("\n\n".join(blocks) + "\n\n（今天已跑过，不重复跑）", recall=False)
+            return
+        picked = extract_lottery(log)
         if picked:
             text = "\n".join(picked)
-            lot_set(key, text)
             _tip = LOT_TIP if any("次：" in x for x in picked) else ""
-            await reply(
-                "【央视频抽奖 · 今日结果】\n%s%s\n\n（今天的任务已经跑过了，这里不重复跑）" % (text, _tip),
-                recall=False,
-            )
+            await reply("【央视频抽奖 · 今日结果】\n%s%s\n\n（今天已跑过，不重复跑）" % (text, _tip), recall=False)
             return
-        await reply(
-            "📋 今天已经跑过一次了，但日志里还没有抽奖结果。\n"
-            "等几分钟再发「央视频抽奖」（不会重复跑任务）。",
-            recall=False,
-        )
+        await reply("📋 今天已经跑过一次了，但日志里还没有抽奖结果。\n等几分钟再发「央视频抽奖」（不会重复跑）。", recall=False)
         return
 
-    # ③ 今天确实没跑过 → 触发一次
+    # ③ 今天没跑过 → 触发一次
     await reply("🎰 今天还没跑过，正在触发青龙任务（ID %s），约 1 分钟…" % task_id)
     try:
         r = await asyncio.to_thread(ql_run_task, task_id)
@@ -755,7 +863,6 @@ async def do_lottery(uid, plat):
     except Exception as e:
         await reply("❌ 触发青龙任务失败：%s" % e)
         return
-
     log = ""
     for _ in range(30):
         await asyncio.sleep(5)
@@ -768,45 +875,116 @@ async def do_lottery(uid, plat):
     if not log:
         await reply("⚠️ 任务已触发但读不到日志，稍后到青龙面板看 ID %s 的运行结果。" % task_id)
         return
+    if is_adm:
+        targets = all_accounts(m)
+    else:
+        targets = [(str(uid), v, r) for v, r in mine]
+    blocks = ["【央视频抽奖 · 结果】"]
+    for qq, vuid, rec in targets:
+        picked = _filter_own_lines(log, vuid)
+        txt = "\n".join(picked) if picked else "（无抽奖记录）"
+        if any("次：" in x for x in picked):
+            txt += LOT_TIP
+        blocks.append("· %s（QQ %s / %s）\n%s" % (rec.get("remark") or qq, qq, vuid[:8], txt))
+    await reply("\n\n".join(blocks), recall=False)
 
-    picked = _filter_own_lines(log, key)
-    text = "\n".join(picked) if picked else "（没有抽到记录，或本次未中奖）"
-    lot_set(key, text)
-    _tip = LOT_TIP if any("次：" in x for x in picked) else ""
-    await reply(
-        "【央视频抽奖 · 你绑定的账号】\n"
-        "%s%s\n\n"
-        "（只显示你绑定账号的结果，查不到别人的）" % (text, _tip),
-        recall=False,
-    )
+
+async def do_remark(uid, plat, arg=""):
+    """央视频备注 名字 [QQ号/vuserid] —— 给自己或(管理员)指定账号加备注。"""
+    parts = str(arg or "").split()
+    if not parts:
+        await reply("格式：央视频备注 我的主号\n（管理员可：央视频备注 名字 QQ号 或 名字 vuserid）")
+        return
+    name = parts[0]
+    m = get_map()
+    # 定位目标
+    if len(parts) >= 2 and _is_admin(uid):
+        key = parts[1]
+        # key 可能是 QQ 或 vuserid
+        if key in m:
+            accs = m[key].get("accounts") or {}
+            target_vuid = sorted(accs.keys())[0] if len(accs) == 1 else None
+        else:
+            target_vuid = key
+            for qq, node in m.items():
+                if key in (node.get("accounts") or {}):
+                    key = qq
+                    break
+    else:
+        key = str(uid)
+        mine = my_accounts(m, uid)
+        target_vuid = (mine[0][0] if len(mine) == 1 else None)
+    node = m.get(key)
+    if not node:
+        await reply("没有这个绑定 / 账号。\n发「央视频状态」查看。")
+        return
+    accs = node.get("accounts") or {}
+    if target_vuid and target_vuid in accs:
+        accs[target_vuid]["remark"] = name
+        set_map(m)
+        await reply("✅ 备注已设为：%s（vuserid %s）" % (name, target_vuid[:8]))
+    else:
+        await reply("你绑定了 %d 个账号，请指定要改哪个：\n央视频备注 名字 vuserid后8位" % len(accs))
+        return
 
 
 async def do_unbind(uid, plat, arg=""):
+    """央视频解绑 [QQ/vuserid] —— 仅管理员；只删绑定，不动青龙 CK。"""
     if not _is_admin(uid):
-        await reply("❌ 无权限解绑（仅管理员可操作）。\n你可以发「央视频状态」查看自己的绑定。")
+        await reply("❌ 无权限解绑（仅管理员可操作）。")
         return
-    target = str(arg).strip() or str(uid)
     m = get_map()
-    if target not in m:
-        await reply("没有这个绑定：%s\n（发「央视频状态」可查看自己的绑定）" % target)
+    arg = str(arg or "").strip()
+    if not arg:
+        await reply("格式：央视频解绑 QQ号 [vuserid]\n（只删绑定，青龙 CK 不动；要连 CK 一起删用「央视频清理」）")
         return
-    m.pop(target, None)
-    set_map(m)
-    await reply("✅ 已解绑 %s（青龙变量里的 CK 没动）。" % ("你的账号" if target == str(uid) else "QQ " + target))
+    parts = arg.split()
+    qq = parts[0]
+    vuids = [parts[1]] if len(parts) > 1 else None
+    killed = del_accounts(m, qq, vuids)
+    if not killed:
+        await reply("没有这个绑定 / 账号：%s" % qq)
+        return
+    await reply("✅ 已解绑 %d 个账号（QQ %s）。\n青龙变量里的 CK 没动。" % (len(killed), qq))
+
+
+async def do_clean(uid, plat, arg=""):
+    """★ 管理员：央视频清理 QQ号 [vuserid] —— 删绑定 + 同步删青龙 YSP_COOKIE 对应行。"""
+    if not _is_admin(uid):
+        await reply("❌ 无权限清理（仅管理员可操作）。")
+        return
+    m = get_map()
+    parts = str(arg or "").split()
+    if not parts:
+        await reply("格式：央视频清理 QQ号 [vuserid]\n· 不带 vuserid = 清掉该 QQ 名下所有账号\n· 带 vuserid = 只精确删那一个\n（会同时删绑定 + 青龙 YSP_COOKIE 里对应行，其他账号不受影响）")
+        return
+    qq = parts[0]
+    vuids = [parts[1]] if len(parts) > 1 else None
+    killed = del_accounts(m, qq, vuids)
+    if not killed:
+        await reply("没有这个绑定 / 账号：%s" % qq)
+        return
+    try:
+        n = await asyncio.to_thread(ql_remove_cookie, killed)
+        extra = "；青龙 YSP_COOKIE 同步删掉 %d 行" % n
+    except Exception as e:
+        extra = "；但青龙变量清理失败：%s（可手动检查）" % e
+    await reply("✅ 已清理 QQ %s 的 %d 个账号%s。\n其他账号不受影响。" % (qq, len(killed), extra), recall=False)
 
 
 async def do_menu(uid, plat):
     lines = [
         "【央视频助手】",
-        "· 央视频登录 → 出二维码，手机央视频 APP 扫码（免短信免滑块）",
-        "· 央视频状态 → 看绑定账号 / 今日抽奖情况",
-        "· 央视频抽奖 → 今天没抽就自动跑一次，返回抽奖结果",
-        "· 央视频备注 名字 → 给绑定加备注（状态里能看到）",
-        "· 央视频解绑 → 解绑你的账号",
-        "· q → 取消当前操作",
-        "",
-        "扫码成功后 CK 会自动写入青龙变量「%s」，并绑定你的 QQ。" % (cfg("ql_var_name") or "ysp"),
+        "· 央视频登录 → 扫码绑定（一人可绑多个号，追加不覆盖）",
+        "· 央视频状态 → 看自己名下所有账号 / 今日抽奖",
+        "· 央视频抽奖 → 今天没抽就跑一次，汇总你的所有账号",
+        "· 央视频备注 名字 → 给账号加备注",
+        "· 央视频解绑 → 解绑账号（仅管理员，CK 不动）",
     ]
+    if _is_admin(uid):
+        lines.append("· 央视频清理 QQ号 [vuserid] → 删绑定+删青龙CK（仅管理员）")
+    lines += ["· q → 取消当前操作", "",
+              "扫码成功后 CK 会合并写入青龙变量「%s」。" % (cfg("ql_var_name") or "YSP_COOKIE")]
     await reply("\n".join(lines), recall=False)
 
 
@@ -897,6 +1075,9 @@ async def main():
         return
     if content == "央视频解绑" or content.startswith("央视频解绑 "):
         await do_unbind(uid, plat, content[len("央视频解绑"):].strip())
+        return
+    if content == "央视频清理" or content.startswith("央视频清理 "):
+        await do_clean(uid, plat, content[len("央视频清理"):].strip())
         return
     return  # 其他消息静默，不抢答
 

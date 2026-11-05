@@ -11,7 +11,7 @@
 # [rule: ^央视频帮助$]
 # [title: 央视频助手]
 # [author: 羽化]
-# [version: 1.0]
+# [version: 1.0.1]
 # [description: 央视频扫码登录(自动写青龙变量+绑定QQ) + 抽奖查询 + 状态]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -62,12 +62,12 @@ UA = ("Mozilla/5.0 (Linux; Android 10; MI 8 Build/QKQ1.190828.002; wv) AppleWebK
 TIMEOUT = 20
 
 DEFAULTS = {
-    "ql_url": "http://192.168.31.99:5700",
-    "ql_client_id": "F7z4-NJbA2Bm",
-    "ql_client_secret": "_ta2JZJvolN92z-ST5niGcjM",
+    "ql_url": "http://127.0.0.1:5700",
+    "ql_client_id": "",
+    "ql_client_secret": "",
     "ql_var_name": "ysp",
     "task_id": "2341",
-    "admin_qq": "1511096909",
+    "admin_qq": "",
     "qr_wait": "180",
     "map": "{}",
 }
@@ -92,12 +92,13 @@ def _load_local():
 
 def cfg(key):
     if _MW is not None:
-        try:
-            v = _MW.bucketGet(BUCKET, key)
-            if v not in (None, ""):
-                return str(v)
-        except Exception:
-            pass
+        for k in (key, "ysp." + key):   # 兼容面板 param 写入的带前缀 key
+            try:
+                v = _MW.bucketGet(BUCKET, k)
+                if v not in (None, ""):
+                    return str(v)
+            except Exception:
+                pass
     _load_local()
     return str(_CFG.get(key, DEFAULTS.get(key, "")))
 
@@ -111,7 +112,7 @@ def set_cfg(key, value):
         pass
     if _MW is not None:
         try:
-            _MW.bucketSet(BUCKET, key, str(value))
+            _MW.bucketSet(BUCKET, "ysp." + key, str(value))
         except Exception:
             pass
 
@@ -567,14 +568,18 @@ async def do_lottery(uid, plat):
     )
 
 
-async def do_unbind(uid, plat):
-    m = get_map()
-    if str(uid) not in m:
-        await reply("你没有绑定央视频账号。")
+async def do_unbind(uid, plat, arg=""):
+    if not _is_admin(uid):
+        await reply("❌ 无权限解绑（仅管理员可操作）。\n你可以发「央视频状态」查看自己的绑定。")
         return
-    m.pop(str(uid), None)
+    target = str(arg).strip() or str(uid)
+    m = get_map()
+    if target not in m:
+        await reply("没有这个绑定：%s\n（发「央视频状态」可查看自己的绑定）" % target)
+        return
+    m.pop(target, None)
     set_map(m)
-    await reply("✅ 已解绑你的央视频账号（青龙变量里的 CK 没动）。")
+    await reply("✅ 已解绑 %s（青龙变量里的 CK 没动）。" % ("你的账号" if target == str(uid) else "QQ " + target))
 
 
 async def do_menu(uid, plat):
@@ -598,7 +603,52 @@ async def _get(fn):
     return v
 
 
+PLUGIN_ID = "ysp"   # 菜单注册表的唯一标识，别和别的插件重名
+
+
+async def _register_menu():
+    """把自己注册到共享菜单注册表（莹莹棒的「菜单」会自动聚合展示）
+
+    格式（每个插件一个槽，互不覆盖）：
+      yyb_bind.menu_registry = {
+        "ysp": [{"text": "...", "admin": false}, ...],
+        "其他插件id": [...]
+      }
+    """
+    items = [
+        {"text": "· 央视频登录 → 扫码登录央视频（自动写青龙变量+绑定QQ）", "admin": False},
+        {"text": "· 央视频状态 → 查看绑定账号 / 今日抽奖", "admin": False},
+        {"text": "· 央视频抽奖 → 今天没抽就自动跑一次", "admin": False},
+        {"text": "· 央视频解绑 [QQ号] → 解绑账号（仅管理员）", "admin": True},
+    ]
+    # ① 写共享文件（莹莹棒菜单直接读这个，最可靠）
+    cur = {}
+    try:
+        mf = os.path.join(HERE, ".menu_registry.json")
+        if os.path.exists(mf):
+            try:
+                cur = json.load(open(mf, encoding="utf-8"))
+            except Exception:
+                cur = {}
+        if not isinstance(cur, dict):
+            cur = {}
+        cur[PLUGIN_ID] = items
+        json.dump(cur, open(mf, "w", encoding="utf-8"), ensure_ascii=False)
+    except Exception:
+        pass
+    # ② 同时写 bucket（面板可查，失败不影响）
+    try:
+        if _MW is not None:
+            _MW.bucketSet("yyb_bind", "menu_registry", json.dumps(cur, ensure_ascii=False))
+    except Exception:
+        pass
+
+
 async def main():
+    try:
+        await _register_menu()
+    except Exception:
+        pass
     try:
         content = str(await _get(sender.getContent) or "").strip()
         uid = str(await _get(sender.getUserId) or "")
@@ -627,8 +677,8 @@ async def main():
     if content in ("央视频抽奖", "央视频抽"):
         await do_lottery(uid, plat)
         return
-    if content in ("央视频解绑",):
-        await do_unbind(uid, plat)
+    if content == "央视频解绑" or content.startswith("央视频解绑 "):
+        await do_unbind(uid, plat, content[len("央视频解绑"):].strip())
         return
     return  # 其他消息静默，不抢答
 

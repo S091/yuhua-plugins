@@ -12,7 +12,7 @@
 # [rule: ^央视频帮助$]
 # [title: 央视频助手]
 # [author: 羽化]
-# [version: 1.1.1]
+# [version: 1.1.2]
 # [description: 央视频扫码登录(自动写青龙变量+绑定QQ) + 抽奖查询 + 状态]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -473,8 +473,11 @@ async def do_login(uid, plat):
     # 绑定到扫码人 QQ
     m = get_map()
     vuid = ck_uid(ck)
+    _old = m.get(str(uid)) or {}
     m[str(uid)] = {"nick": "央视频%s" % (vuid[-6:] if vuid else "user"), "vuserid": vuid,
-                   "ck": ck, "ts": int(time.time())}
+                   "ck": ck, "ts": int(time.time()),
+                   # ★ 备注默认就是 QQ 号；重新扫码时保留用户自己改过的备注
+                   "remark": _old.get("remark") or str(uid)}
     set_map(m)
     set_cfg("waiting_qr", "{}")
 
@@ -521,7 +524,8 @@ async def do_status(uid, plat):
     lines = [
         "【央视频账号状态】",
         "· 绑定 QQ：%s" % uid,
-        "· 备注：%s" % (rec.get("remark") or "（未设置，发「央视频备注 名字」可加）"),
+        "· 备注：%s%s" % (rec.get("remark") or uid,
+                          "" if rec.get("remark") else "（默认QQ号，发「央视频备注 名字」可改）"),
         "· vuserid：%s" % (rec.get("vuserid") or "?"),
         "· 绑定时间：%s" % time.strftime("%Y-%m-%d %H:%M", time.localtime(rec.get("ts") or 0)),
         "· CK：%s…（%d 字符）" % ((rec.get("ck") or "")[:40], len(rec.get("ck") or "")),

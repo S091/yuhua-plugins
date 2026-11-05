@@ -12,7 +12,7 @@
 # [rule: ^央视频帮助$]
 # [title: 央视频助手]
 # [author: 羽化]
-# [version: 1.3.0]
+# [version: 1.3.1]
 # [description: 央视频扫码登录(自动写青龙变量+绑定QQ) + 抽奖查询 + 状态]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -72,6 +72,10 @@ DEFAULTS = {
     "qr_wait": "180",
     "map": "{}",
 }
+
+# 中奖后的领取指引（只在中奖结果里追加）
+LOT_TIP = "\n\n📦 领取方式：我的 → 积分 → 签到 → 右上角「我的奖品」"
+
 
 # ---------------- 配置（bucket 优先，本地文件兜底） ----------------
 _MW = None
@@ -622,6 +626,8 @@ async def do_lottery(uid, plat):
                 if pts and "→" in pts:
                     a, b = pts.split("→", 1)
                     text += "\n💰 积分 %s → %s" % (a.strip(), b.strip())
+                if "次：" in result:
+                    text += LOT_TIP
                 lot_set(key, text)
                 await reply(
                     "【央视频抽奖 · 今日结果】\n%s\n\n时间：%s\n（今天已经跑过了，不会重复跑）" % (text, when),
@@ -634,10 +640,13 @@ async def do_lottery(uid, plat):
     # ② 插件自己记录过今天的结果 → 直接返回，不跑任务
     hit = lot_today(key)
     if hit:
+        _ht = hit.get("text") or "（无详细记录）"
+        if "次：" in _ht and LOT_TIP.strip() not in _ht:
+            _ht += LOT_TIP
         await reply(
             "【央视频抽奖 · 今日结果】\n"
             "%s\n"
-            "（今天 %s 跑的，不会重复跑）" % (hit.get("text") or "（无详细记录）",
+            "（今天 %s 跑的，不会重复跑）" % (_ht,
                                         time.strftime("%H:%M", time.localtime(hit.get("ts") or 0))),
             recall=False,
         )
@@ -656,8 +665,9 @@ async def do_lottery(uid, plat):
         if picked:
             text = "\n".join(picked)
             lot_set(key, text)
+            _tip = LOT_TIP if any("次：" in x for x in picked) else ""
             await reply(
-                "【央视频抽奖 · 今日结果】\n%s\n\n（今天的任务已经跑过了，这里不重复跑）" % text,
+                "【央视频抽奖 · 今日结果】\n%s%s\n\n（今天的任务已经跑过了，这里不重复跑）" % (text, _tip),
                 recall=False,
             )
             return
@@ -695,10 +705,11 @@ async def do_lottery(uid, plat):
     picked = _filter_own_lines(log, key)
     text = "\n".join(picked) if picked else "（没有抽到记录，或本次未中奖）"
     lot_set(key, text)
+    _tip = LOT_TIP if any("次：" in x for x in picked) else ""
     await reply(
         "【央视频抽奖 · 你绑定的账号】\n"
-        "%s\n\n"
-        "（只显示你绑定账号的结果，查不到别人的）" % text,
+        "%s%s\n\n"
+        "（只显示你绑定账号的结果，查不到别人的）" % (text, _tip),
         recall=False,
     )
 

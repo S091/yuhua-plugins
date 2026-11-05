@@ -1,0 +1,18 @@
+{
+  "plugins/羽化@央视频助手.py": {
+    "id": "央视频助手",
+    "name": "央视频助手",
+    "title": "央视频助手",
+    "type": "python",
+    "path": "plugins/羽化@央视频助手.py",
+    "version": "v1.0.0",
+    "desc": "❶央视频扫码登录：发「央视频登录」出二维码，手机央视频APP扫码，自动换取可续期家族票并写入指定青龙变量<br>❷央视频抽奖：查当日记录，没有则触发青龙任务跑一次并返回结果<br>❸扫码后自动绑定QQ，支持状态查询/解绑<br>指令：央视频登录 / 央视频状态 / 央视频抽奖 / 央视频解绑 / 央视频菜单",
+    "rule": "^(央视频)(登录|扫码|重登|状态|查询|抽奖|抽|解绑|菜单|帮助)$",
+    "icon": "https://api.iconify.design/lucide:video.svg",
+    "author": "羽化",
+    "class": "工具类",
+    "public": true,
+    "admin": false,
+    "disable": false
+  }
+}

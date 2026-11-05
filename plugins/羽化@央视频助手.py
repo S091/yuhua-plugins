@@ -12,7 +12,7 @@
 # [rule: ^央视频帮助$]
 # [title: 央视频助手]
 # [author: 羽化]
-# [version: 1.4.0]
+# [version: 1.4.2]
 # [description: 央视频扫码登录(自动写青龙变量+绑定QQ) + 抽奖查询 + 状态]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -572,6 +572,36 @@ def _state():
 
 async def do_status(uid, plat):
     m = get_map()
+
+    # ★ 管理员：默认总览所有绑定账号（不只看自己）
+    if _is_admin(uid):
+        if not m:
+            await reply("【央视频账号总览】\n目前没有任何绑定账号。\n发「央视频登录」扫码绑定。", recall=False)
+            return
+        blocks = ["【央视频账号总览】共 %d 个账号（管理员视角）" % len(m)]
+        for qq in sorted(m.keys()):
+            rec = m.get(qq) or {}
+            vuid = rec.get("vuserid") or "?"
+            lot = lot_today(vuid)
+            # 本地没记录时回退看青龙变量（全局结果，单账号场景准确）
+            if not lot:
+                try:
+                    _raw = await asyncio.to_thread(ql_get_var, "YSP_LAST_LOTTERY")
+                    if _raw and str(_raw).startswith(time.strftime("%Y-%m-%d")):
+                        _p = str(_raw).split("|")
+                        if len(_p) >= 2 and "次：" in _p[1]:
+                            lot = {"ts": time.time(), "text": _p[1]}
+                except Exception:
+                    pass
+            blocks.append(
+                "· %s（QQ %s）\n  vuserid：%s\n  今日抽奖：%s\n  绑定时间：%s" % (
+                    rec.get("remark") or qq, qq, vuid,
+                    (("有记录 " + time.strftime("%H:%M", time.localtime(lot.get("ts") or 0))) if lot else "未抽"),
+                    time.strftime("%m-%d %H:%M", time.localtime(rec.get("ts") or 0))))
+        await reply("\n\n".join(blocks), recall=False)
+        return
+
+    # 普通用户：只看自己
     rec = m.get(str(uid))
     if not rec:
         await reply("你还没有绑定央视频账号。\n发「央视频登录」扫码绑定。")
@@ -619,10 +649,34 @@ def _filter_own_lines(log, vuserid):
 
 async def do_lottery(uid, plat):
     m = get_map()
+
+    # ★ 管理员：默认汇总所有绑定账号的今日结果
+    if _is_admin(uid) and m:
+        blocks = ["【央视频抽奖 · 全部账号】共 %d 个（管理员视角）" % len(m)]
+        has_any = False
+        for qq in sorted(m.keys()):
+            rec = m.get(qq) or {}
+            vuid = rec.get("vuserid") or qq
+            hit = lot_today(vuid)
+            if hit:
+                has_any = True
+                blocks.append("· %s（QQ %s）\n%s" % (rec.get("remark") or qq, qq,
+                                                     hit.get("text") or "（无详细记录）"))
+            else:
+                blocks.append("· %s（QQ %s）\n（今日无记录）" % (rec.get("remark") or qq, qq))
+        if has_any:
+            await reply("\n\n".join(blocks), recall=False)
+            return
+        # 全都没有 → 继续走"触发一次"的流程（用主账号的 key 记录）
+        await reply("\n\n".join(blocks) + "\n\n今天还没有任何账号跑过，正在触发一次…", recall=False)
+
     rec = m.get(str(uid))
     if not rec:
-        await reply("你还没有绑定央视频账号。\n先发「央视频登录」扫码绑定，再来抽奖。")
-        return
+        if _is_admin(uid):
+            rec = {"vuserid": ""}         # 管理员没绑也能触发
+        else:
+            await reply("你还没有绑定央视频账号。\n先发「央视频登录」扫码绑定，再来抽奖。")
+            return
     key = rec.get("vuserid") or str(uid)
 
     # ① ★ 优先读青龙变量 YSP_LAST_LOTTERY（ysp.py 每次跑完写入，不受"最新日志"限制）

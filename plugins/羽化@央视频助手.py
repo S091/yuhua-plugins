@@ -12,7 +12,7 @@
 # [rule: ^央视频帮助$]
 # [title: 央视频助手]
 # [author: 羽化]
-# [version: 1.1.2]
+# [version: 1.3.0]
 # [description: 央视频扫码登录(自动写青龙变量+绑定QQ) + 抽奖查询 + 状态]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -333,6 +333,18 @@ def ql_set_var(name, value):
     return "created", eid, r
 
 
+def ql_get_var(name):
+    """读青龙环境变量值（读不到返回空串）"""
+    try:
+        d = ql_api("GET", "/open/envs?searchValue=" + urllib.parse.quote(name))
+        for e in (d.get("data") or []):
+            if str(e.get("name")) == name:
+                return str(e.get("value") or "")
+    except Exception:
+        pass
+    return ""
+
+
 def ql_run_task(task_id):
     # ★ 青龙 OpenAPI 收「裸数组」，不是 {"ids":[...]}（传错报 400 Validation failed）
     return ql_api("PUT", "/open/crons/run", [int(task_id)])
@@ -373,16 +385,43 @@ def lot_set(uid_key, text):
 
 
 def extract_lottery(log):
-    """从青龙任务日志里提取抽奖相关行"""
-    keys = ("抽奖", "中奖", "奖品", "宠粉", "积分", "次：", "共抽", "实奖", "券")
+    """从日志提取「结论」（奖品 / 次数 / 积分变化），不给日志流水"""
     out = []
-    for ln in log.split("\n"):
-        s = ln.strip()
-        if not s:
+    for ln in str(log or "").split("\n"):
+        t = ln.strip()
+        if not t:
             continue
-        if any(k in s for k in keys):
-            out.append(s[:180])
-    return out[-14:]
+        # 具体结果：抽奖 3 次：宠粉券（付邮）、刮痧板+拨筋棒（实奖）、宠粉券
+        m = re.search(r"抽奖\s*(\d+)\s*次[：:]\s*(.+)$", t)
+        if m:
+            out.append("🎁 抽了 %s 次：%s" % (m.group(1), m.group(2).strip()))
+            continue
+        # 次数用完 / 跳过
+        m2 = re.search(r"抽奖[：:]\s*(.+)$", t)
+        if m2 and ("用完" in t or "跳过" in t):
+            out.append("ℹ️ 抽奖：%s" % m2.group(1).strip())
+            continue
+        # 积分变化
+        m3 = re.search(r"积分\s*(\d+)\s*→\s*(\d+)", t)
+        if m3:
+            d = int(m3.group(2)) - int(m3.group(1))
+            out.append("💰 积分 %s → %s（%+d）" % (m3.group(1), m3.group(2), d))
+    seen = []
+    for x in out:
+        if x not in seen:
+            seen.append(x)
+    return seen[:8]
+
+
+def _log_is_today(log, today):
+    """青龙任务日志首行是 '## 开始执行... 2026-11-06 02:06:38'"""
+    try:
+        for ln in str(log or "").split("\n")[:3]:
+            if today in ln:
+                return True
+    except Exception:
+        pass
+    return False
 
 
 # ---------------- 业务 ----------------
@@ -568,21 +607,69 @@ async def do_lottery(uid, plat):
         await reply("你还没有绑定央视频账号。\n先发「央视频登录」扫码绑定，再来抽奖。")
         return
     key = rec.get("vuserid") or str(uid)
+
+    # ① ★ 优先读青龙变量 YSP_LAST_LOTTERY（ysp.py 每次跑完写入，不受"最新日志"限制）
+    #    格式: 2026-11-06 01:59|抽奖 3 次：xxx、yyy|45→55
+    try:
+        raw = await asyncio.to_thread(ql_get_var, "YSP_LAST_LOTTERY")
+        if raw and raw.startswith(time.strftime("%Y-%m-%d")):
+            parts = str(raw).split("|")
+            if len(parts) >= 2 and parts[1].strip():
+                when = parts[0].strip()
+                result = parts[1].strip()
+                pts = parts[2].strip() if len(parts) > 2 else ""
+                text = "🎁 %s" % result
+                if pts and "→" in pts:
+                    a, b = pts.split("→", 1)
+                    text += "\n💰 积分 %s → %s" % (a.strip(), b.strip())
+                lot_set(key, text)
+                await reply(
+                    "【央视频抽奖 · 今日结果】\n%s\n\n时间：%s\n（今天已经跑过了，不会重复跑）" % (text, when),
+                    recall=False,
+                )
+                return
+    except Exception:
+        pass
+
+    # ② 插件自己记录过今天的结果 → 直接返回，不跑任务
     hit = lot_today(key)
     if hit:
         await reply(
-            "【央视频抽奖 · 今日已有记录】\n"
-            "时间：%s\n"
-            "结果：\n%s\n\n"
-            "（每天只跑一次，明天再来）" % (
-                time.strftime("%H:%M", time.localtime(hit.get("ts") or 0)),
-                hit.get("text") or "（无详细记录）"),
+            "【央视频抽奖 · 今日结果】\n"
+            "%s\n"
+            "（今天 %s 跑的，不会重复跑）" % (hit.get("text") or "（无详细记录）",
+                                        time.strftime("%H:%M", time.localtime(hit.get("ts") or 0))),
             recall=False,
         )
         return
 
     task_id = cfg("task_id") or "2341"
-    await reply("🎰 今日还没有抽奖记录，正在触发青龙任务（ID %s）…" % task_id)
+
+    # ② 先读青龙「最新一次」日志：如果是今天跑的，直接给结果，不重复触发
+    log = ""
+    try:
+        log = await asyncio.to_thread(ql_task_log, task_id)
+    except Exception:
+        log = ""
+    if log and _log_is_today(log, time.strftime("%Y-%m-%d")):
+        picked = _filter_own_lines(log, key)
+        if picked:
+            text = "\n".join(picked)
+            lot_set(key, text)
+            await reply(
+                "【央视频抽奖 · 今日结果】\n%s\n\n（今天的任务已经跑过了，这里不重复跑）" % text,
+                recall=False,
+            )
+            return
+        await reply(
+            "📋 今天已经跑过一次了，但日志里还没有抽奖结果。\n"
+            "等几分钟再发「央视频抽奖」（不会重复跑任务）。",
+            recall=False,
+        )
+        return
+
+    # ③ 今天确实没跑过 → 触发一次
+    await reply("🎰 今天还没跑过，正在触发青龙任务（ID %s），约 1 分钟…" % task_id)
     try:
         r = await asyncio.to_thread(ql_run_task, task_id)
         if str(r.get("code")) not in ("200", "None"):
@@ -592,7 +679,6 @@ async def do_lottery(uid, plat):
         await reply("❌ 触发青龙任务失败：%s" % e)
         return
 
-    # 等任务跑完（最多 150 秒）
     log = ""
     for _ in range(30):
         await asyncio.sleep(5)
@@ -603,7 +689,7 @@ async def do_lottery(uid, plat):
         if "开始执行" in log and ("耗时" in log or "失败" in log or "成功" in log):
             break
     if not log:
-        await reply("⚠️ 任务已触发但读不到日志，请稍后到青龙面板看 ID %s 的运行结果。" % task_id)
+        await reply("⚠️ 任务已触发但读不到日志，稍后到青龙面板看 ID %s 的运行结果。" % task_id)
         return
 
     picked = _filter_own_lines(log, key)
@@ -615,27 +701,6 @@ async def do_lottery(uid, plat):
         "（只显示你绑定账号的结果，查不到别人的）" % text,
         recall=False,
     )
-
-
-async def do_remark(uid, plat, text=""):
-    """给绑定加备注：央视频备注 我的主号 [QQ号]"""
-    m = get_map()
-    parts = str(text or "").strip().split()
-    if not parts:
-        await reply("用法：\n· 央视频备注 我的主号\n· 央视频备注 123456 我妈的号（管理员给别人设）")
-        return
-    target = str(uid)
-    body = " ".join(parts)
-    # 管理员可以第一个参数写 QQ 号
-    if _is_admin(uid) and len(parts) >= 2 and parts[0].isdigit() and len(parts[0]) >= 5:
-        target = parts[0]
-        body = " ".join(parts[1:])
-    if target not in m:
-        await reply("没有找到绑定：%s" % target)
-        return
-    m[target]["remark"] = body[:30]
-    set_map(m)
-    await reply("✅ 已设置备注：%s → 「%s」" % (target, m[target]["remark"]))
 
 
 async def do_unbind(uid, plat, arg=""):

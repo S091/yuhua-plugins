@@ -10,11 +10,10 @@
 # [rule: ^央视频解绑( .+)?$]
 # [rule: ^央视频清理( .+)?$]
 # [rule: ^央视频菜单$]
-# [rule: ?]
 # [rule: ^央视频帮助$]
 # [title: 央视频助手]
 # [author: 羽化]
-# [version: 2.1.1]
+# [version: 2.2.1]
 # [description: 央视频扫码登录(自动写青龙变量+绑定QQ) + 抽奖查询 + 状态]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -49,6 +48,11 @@ import urllib.parse
 import urllib.request
 
 from sillygirl import sender
+
+try:
+    import ysp_remark   # 共享: 扫码后备注落地(会话交给莹莹棒)
+except Exception:
+    ysp_remark = None
 
 try:
     import recall_core          # 共享撤回模块（全局通用）
@@ -447,7 +451,11 @@ def ql_merge_cookie(newck, vuid, tag):
         else:
             lines.append("%s#%s" % (name or tag, ck))
     if not hit:
-        lines.append("%s#%s" % (tag, newck))
+        _names = [ln.split("#", 1)[0] for ln in lines if "#" in ln]
+        _t, _i = str(tag), 2
+        while _t in _names:
+            _t, _i = "%s%d" % (tag, _i), _i + 1
+        lines.append("%s#%s" % (_t, newck))
     value = "\n".join(lines)
     return ql_set_var(var, value), len(lines)
 
@@ -655,11 +663,19 @@ async def do_login(uid, plat):
         await reply("❌ 扫码成功但换票失败：%s" % e)
         return
 
-    # ★★ 扫码成功：先进入「备注态」，暂不写青龙（备注完才推）
-    set_cfg("waiting_qr", "{}")     # 扫码等待结束
+    # ★★ 扫码成功：只写一份「待备注」标记 + 弹提示，本插件即结束(会话自动让给莹莹棒总入口)
+    #    备注确定后由莹莹棒调用 ysp_remark.finalize 写青龙/绑定/跑任务
+    set_cfg("waiting_qr", "{}")
     vuid = ck_uid(ck) or ("q%s" % str(uid))
-    _set_remark_state({"uid": str(uid), "plat": plat, "ck": ck,
-                       "vuid": vuid, "qid": qid, "ts": time.time()})
+    try:
+        if ysp_remark is not None:
+            ysp_remark.pending_save({"uid": str(uid), "plat": plat, "ck": ck,
+                                     "vuid": vuid, "qid": qid, "ts": time.time()})
+        else:
+            _set_remark_state({"uid": str(uid), "plat": plat, "ck": ck,
+                               "vuid": vuid, "qid": qid, "ts": time.time()})
+    except Exception:
+        pass
     await reply(REMARK_HINT, recall=False)
 
 
@@ -688,7 +704,9 @@ async def finalize_login(uid, plat, ck, vuid, qid, remark):
     var = cfg("ql_var_name") or "YSP_COOKIE"
     act, eid, r, total = "?", None, {}, 0
     try:
-        (act, eid, r), total = await asyncio.to_thread(ql_merge_cookie, ck, vuid, uid)
+        # tag 用备注名(每号唯一)，别用 QQ 号——多账号同名会让 ysp.py 回写 dict 撞车互相覆盖
+        _tag = (remark or str(vuid))
+        (act, eid, r), total = await asyncio.to_thread(ql_merge_cookie, ck, vuid, _tag)
     except Exception as e:
         await reply("⚠️ CK 已拿到但写青龙变量失败：%s" % e, recall=False)
 
@@ -1131,11 +1149,6 @@ async def main():
             await asyncio.to_thread(cron_remark_timeout)
         except Exception:
             pass
-        return
-
-    # ★★ 备注态：任意消息(含空/回车)交给 handle_remark 优先处理
-    #    q=取消 / 空=默认QQ号 / 文字=备注 → 确定后才写青龙
-    if await handle_remark(uid, plat, content):
         return
 
     # 扫码等待期的 q → 全局取消（莹莹棒也会回一条，这里只清自己的状态，不重复回文字）

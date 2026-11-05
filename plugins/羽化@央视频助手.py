@@ -6,12 +6,13 @@
 # [rule: ^央视频查询$]
 # [rule: ^央视频抽奖$]
 # [rule: ^央视频抽$]
-# [rule: ^央视频解绑$]
+# [rule: ^央视频备注( .+)?$]
+# [rule: ^央视频解绑( .+)?$]
 # [rule: ^央视频菜单$]
 # [rule: ^央视频帮助$]
 # [title: 央视频助手]
 # [author: 羽化]
-# [version: 1.0.3]
+# [version: 1.1.1]
 # [description: 央视频扫码登录(自动写青龙变量+绑定QQ) + 抽奖查询 + 状态]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -65,7 +66,7 @@ DEFAULTS = {
     "ql_url": "http://127.0.0.1:5700",
     "ql_client_id": "",
     "ql_client_secret": "",
-    "ql_var_name": "ysp",
+    "ql_var_name": "YSP_COOKIE",
     "task_id": "2341",
     "admin_qq": "",
     "qr_wait": "180",
@@ -333,7 +334,8 @@ def ql_set_var(name, value):
 
 
 def ql_run_task(task_id):
-    return ql_api("PUT", "/open/crons/run", {"ids": [int(task_id)]})
+    # ★ 青龙 OpenAPI 收「裸数组」，不是 {"ids":[...]}（传错报 400 Validation failed）
+    return ql_api("PUT", "/open/crons/run", [int(task_id)])
 
 
 def ql_task_log(task_id):
@@ -406,6 +408,7 @@ async def do_login(uid, plat):
     await reply(
         "【央视频登录】\n"
         "请用手机「央视频」APP 扫上面二维码，扫完在手机上点确认。\n"
+        "💡 不方便直接扫的话：**先把二维码截图保存，再打开央视频 App → 扫码 → 右上角「相册」，选中这张截图即可**。\n"
         "二维码约 3 分钟有效；回复 q 可取消等待。",
         recall=False,
     )
@@ -484,34 +487,21 @@ async def do_login(uid, plat):
         recall=False,
     )
 
-    # ★ 登录成功 → 自动启用积分任务并立刻跑一次（签到 + 任务上报 + 领积分 + 抽奖）
+    # ★ 登录成功 → 后台启用并跑一次，不在这里发日志（用户要求：扫码后只提示稍后查询）
     try:
         tid = int(cfg("task_id") or "2341")
     except Exception:
         tid = 2341
-    await reply("🎬 CK 已就绪，正在启用积分任务并跑一次全套（签到 / 任务 / 领积分 / 抽奖）…\n约 1~2 分钟，跑完把结果发你。", recall=False)
     try:
-        await asyncio.to_thread(ql_api, "PUT", "/open/crons/enable", {"ids": [tid]})
-        await asyncio.to_thread(ql_api, "PUT", "/open/crons/run", {"ids": [tid]})
+        await asyncio.to_thread(ql_api, "PUT", "/open/crons/enable", [tid])
+        await asyncio.to_thread(ql_api, "PUT", "/open/crons/run", [tid])
+        await reply(
+            "🎬 已在后台开始跑今日积分任务（签到 / 任务 / 领积分 / 抽奖）。\n"
+            "⏳ 约 5~8 分钟跑完，**稍后发「央视频抽奖」查看结果**（只看你自己绑定的账号）。",
+            recall=False,
+        )
     except Exception as e:
-        await reply("⚠️ 触发积分任务失败：%s\n（可到青龙面板手动运行 ID %s）" % (e, tid))
-        return
-
-    log = ""
-    for _ in range(36):
-        await asyncio.sleep(5)
-        try:
-            d = await asyncio.to_thread(ql_task_log, tid)
-            log = str(d or "")
-        except Exception:
-            continue
-        if "开始执行" in log and ("耗时" in log or "失败" in log or "成功" in log):
-            break
-    if not log:
-        await reply("⚠️ 任务已触发但读不到日志，稍后到青龙面板看 ID %s 的结果。" % tid)
-        return
-    body_lines = [ln for ln in log.split("\n") if ln.strip()][-14:]
-    await reply("【央视频积分任务 · 刚跑完】\n" + "\n".join(body_lines)[:1500], recall=False)
+        await reply("⚠️ 积分任务触发失败：%s\n（可到青龙面板手动运行 ID %s）" % (e, tid))
 
 
 def _state():
@@ -531,12 +521,40 @@ async def do_status(uid, plat):
     lines = [
         "【央视频账号状态】",
         "· 绑定 QQ：%s" % uid,
+        "· 备注：%s" % (rec.get("remark") or "（未设置，发「央视频备注 名字」可加）"),
         "· vuserid：%s" % (rec.get("vuserid") or "?"),
         "· 绑定时间：%s" % time.strftime("%Y-%m-%d %H:%M", time.localtime(rec.get("ts") or 0)),
         "· CK：%s…（%d 字符）" % ((rec.get("ck") or "")[:40], len(rec.get("ck") or "")),
         "· 今日抽奖：%s" % (("已抽（%s）" % (lot.get("text") or "")[:60]) if lot else "未抽"),
     ]
     await reply("\n".join(lines), recall=False)
+
+
+def _filter_own_lines(log, vuserid):
+    """从任务日志里只提取属于本账号的抽奖/积分行。
+
+    单账号：日志里没有 '账号N' 分段标记 → 直接返回抽奖相关行。
+    多账号：青龙日志按 '[x/y 账号N]' 分段，找到含本 vuserid 的段，只取该段。
+    """
+    try:
+        lines = [ln for ln in str(log or "").split("\n") if ln.strip()]
+        if not lines:
+            return []
+        # 找分段标记
+        seg_idx = [i for i, ln in enumerate(lines) if "账号" in ln and "][" in ln]
+        if len(seg_idx) <= 1:
+            return extract_lottery(log)          # 单账号：全归他
+        # 多账号：逐段判断哪个段属于本账号
+        bounds = seg_idx + [len(lines)]
+        for k in range(len(seg_idx)):
+            seg = lines[bounds[k]:bounds[k + 1]]
+            seg_text = "\n".join(seg)
+            if vuserid and str(vuserid) in seg_text:
+                return extract_lottery(seg_text)
+        # 日志里没有 vuserid 字样 → 保守起见只返回第一段（通常就是触发者自己的）
+        return extract_lottery("\n".join(lines[bounds[0]:bounds[1]]))
+    except Exception:
+        return extract_lottery(log)
 
 
 async def do_lottery(uid, plat):
@@ -584,16 +602,36 @@ async def do_lottery(uid, plat):
         await reply("⚠️ 任务已触发但读不到日志，请稍后到青龙面板看 ID %s 的运行结果。" % task_id)
         return
 
-    picked = extract_lottery(log)
-    text = "\n".join(picked) if picked else "（日志里没有抽奖相关行）"
+    picked = _filter_own_lines(log, key)
+    text = "\n".join(picked) if picked else "（没有抽到记录，或本次未中奖）"
     lot_set(key, text)
-    tail = [ln for ln in log.split("\n") if ln.strip()][-6:]
     await reply(
-        "【央视频抽奖 · 刚跑完】\n"
+        "【央视频抽奖 · 你绑定的账号】\n"
         "%s\n\n"
-        "—— 任务尾部 ——\n%s" % (text, "\n".join(tail[-6:])),
+        "（只显示你绑定账号的结果，查不到别人的）" % text,
         recall=False,
     )
+
+
+async def do_remark(uid, plat, text=""):
+    """给绑定加备注：央视频备注 我的主号 [QQ号]"""
+    m = get_map()
+    parts = str(text or "").strip().split()
+    if not parts:
+        await reply("用法：\n· 央视频备注 我的主号\n· 央视频备注 123456 我妈的号（管理员给别人设）")
+        return
+    target = str(uid)
+    body = " ".join(parts)
+    # 管理员可以第一个参数写 QQ 号
+    if _is_admin(uid) and len(parts) >= 2 and parts[0].isdigit() and len(parts[0]) >= 5:
+        target = parts[0]
+        body = " ".join(parts[1:])
+    if target not in m:
+        await reply("没有找到绑定：%s" % target)
+        return
+    m[target]["remark"] = body[:30]
+    set_map(m)
+    await reply("✅ 已设置备注：%s → 「%s」" % (target, m[target]["remark"]))
 
 
 async def do_unbind(uid, plat, arg=""):
@@ -616,6 +654,7 @@ async def do_menu(uid, plat):
         "· 央视频登录 → 出二维码，手机央视频 APP 扫码（免短信免滑块）",
         "· 央视频状态 → 看绑定账号 / 今日抽奖情况",
         "· 央视频抽奖 → 今天没抽就自动跑一次，返回抽奖结果",
+        "· 央视频备注 名字 → 给绑定加备注（状态里能看到）",
         "· 央视频解绑 → 解绑你的账号",
         "· q → 取消当前操作",
         "",
@@ -647,6 +686,7 @@ async def _register_menu():
         {"text": "· 央视频登录 → 扫码登录央视频（自动写青龙变量+绑定QQ）", "admin": False},
         {"text": "· 央视频状态 → 查看绑定账号 / 今日抽奖", "admin": False},
         {"text": "· 央视频抽奖 → 今天没抽就自动跑一次", "admin": False},
+        {"text": "· 央视频备注 名字 → 给绑定加备注（好区分）", "admin": False},
         {"text": "· 央视频解绑 [QQ号] → 解绑账号（仅管理员）", "admin": True},
     ]
     # ① 写共享文件（莹莹棒菜单直接读这个，最可靠）
@@ -704,6 +744,9 @@ async def main():
         return
     if content in ("央视频抽奖", "央视频抽"):
         await do_lottery(uid, plat)
+        return
+    if content == "央视频备注" or content.startswith("央视频备注 "):
+        await do_remark(uid, plat, content[len("央视频备注"):].strip())
         return
     if content == "央视频解绑" or content.startswith("央视频解绑 "):
         await do_unbind(uid, plat, content[len("央视频解绑"):].strip())

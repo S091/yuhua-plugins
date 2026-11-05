@@ -11,7 +11,7 @@
 # [rule: ^央视频帮助$]
 # [title: 央视频助手]
 # [author: 羽化]
-# [version: 1.0.1]
+# [version: 1.0.2]
 # [description: 央视频扫码登录(自动写青龙变量+绑定QQ) + 抽奖查询 + 状态]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -484,6 +484,35 @@ async def do_login(uid, plat):
         "%s" % (qid[:8] + "…", var, act, ("（变量ID %s）" % eid) if eid else ""),
         recall=False,
     )
+
+    # ★ 登录成功 → 自动启用积分任务并立刻跑一次（签到 + 任务上报 + 领积分 + 抽奖）
+    try:
+        tid = int(cfg("task_id") or "2341")
+    except Exception:
+        tid = 2341
+    await reply("🎬 CK 已就绪，正在启用积分任务并跑一次全套（签到 / 任务 / 领积分 / 抽奖）…\n约 1~2 分钟，跑完把结果发你。", recall=False)
+    try:
+        await asyncio.to_thread(ql_api, "PUT", "/open/crons/enable", {"ids": [tid]})
+        await asyncio.to_thread(ql_api, "PUT", "/open/crons/run", {"ids": [tid]})
+    except Exception as e:
+        await reply("⚠️ 触发积分任务失败：%s\n（可到青龙面板手动运行 ID %s）" % (e, tid))
+        return
+
+    log = ""
+    for _ in range(36):
+        await asyncio.sleep(5)
+        try:
+            d = await asyncio.to_thread(ql_task_log, tid)
+            log = str(d or "")
+        except Exception:
+            continue
+        if "开始执行" in log and ("耗时" in log or "失败" in log or "成功" in log):
+            break
+    if not log:
+        await reply("⚠️ 任务已触发但读不到日志，稍后到青龙面板看 ID %s 的结果。" % tid)
+        return
+    body_lines = [ln for ln in log.split("\n") if ln.strip()][-14:]
+    await reply("【央视频积分任务 · 刚跑完】\n" + "\n".join(body_lines)[:1500], recall=False)
 
 
 def _state():

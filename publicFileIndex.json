@@ -5,7 +5,7 @@
     "title": "央视频助手",
     "type": "python",
     "path": "plugins/羽化@央视频助手.py",
-    "version": "v1.3.1",
+    "version": "v1.4.0",
     "desc": "❶央视频扫码登录：出二维码→APP扫码→自动换可续期家族票→写青龙变量→绑定QQ→**自动跑一次全套积分任务**<br>❷央视频抽奖：查当日记录，没有则触发青龙任务跑一次并返回结果<br>❸解绑仅管理员；菜单自动聚合到「莹莹棒取码助手」<br>指令：央视频登录 / 央视频状态 / 央视频抽奖 / 央视频解绑 / 央视频菜单",
     "rule": "^(央视频)(登录|扫码|重登|状态|查询|抽奖|抽|备注|解绑|菜单|帮助)",
     "icon": "https://api.iconify.design/lucide:video.svg",
@@ -14,5 +14,21 @@
     "public": true,
     "admin": false,
     "disable": false
+  },
+  "plugins/recall_core.py": {
+    "id": "recall_core",
+    "name": "recall_core",
+    "title": "共享撤回模块",
+    "type": "python",
+    "path": "plugins/recall_core.py",
+    "version": "v1.0.0",
+    "desc": "羽化插件共享撤回模块：消息登记、cron 撤回、二维码开关、指令处理。其他插件 import 即用。",
+    "rule": "",
+    "icon": "https://api.iconify.design/lucide:trash-2.svg",
+    "author": "羽化",
+    "class": "工具类",
+    "public": true,
+    "admin": false,
+    "disable": true
   }
 }

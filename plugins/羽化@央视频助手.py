@@ -12,7 +12,7 @@
 # [rule: ^央视频帮助$]
 # [title: 央视频助手]
 # [author: 羽化]
-# [version: 1.3.1]
+# [version: 1.4.0]
 # [description: 央视频扫码登录(自动写青龙变量+绑定QQ) + 抽奖查询 + 状态]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -47,6 +47,11 @@ import urllib.parse
 import urllib.request
 
 from sillygirl import sender
+
+try:
+    import recall_core          # 共享撤回模块（全局通用）
+except Exception:
+    recall_core = None
 
 HERE = "/data/plugins"
 CFG_FILE = os.path.join(HERE, ".ysp_cfg.json")
@@ -430,7 +435,15 @@ def _log_is_today(log, today):
 
 # ---------------- 业务 ----------------
 async def reply(text, recall=True):
-    return await sender.reply(text)
+    """统一回复：登记到共享撤回队列（CQ:image 自动识别为二维码，按 qr_recall 开关）"""
+    mid = await sender.reply(text)
+    if recall and mid:
+        try:
+            if recall_core is not None:
+                recall_core.notify(mid, "qr" if "[CQ:image" in str(text) else "normal")
+        except Exception:
+            pass
+    return mid
 
 
 async def do_login(uid, plat):

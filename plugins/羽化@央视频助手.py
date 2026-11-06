@@ -13,7 +13,7 @@
 # [rule: ^央视频帮助$]
 # [title: 央视频助手]
 # [author: 羽化]
-# [version: 2.3.1]
+# [version: 2.3.2]
 # [description: 央视频扫码登录(自动写青龙变量+绑定QQ) + 抽奖查询 + 状态]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -550,10 +550,9 @@ def extract_lottery(log):
         if m:
             out.append("🎁 抽了 %s 次：%s" % (m.group(1), m.group(2).strip()))
             continue
-        # 次数用完 / 跳过
-        m2 = re.search(r"抽奖[：:]\s*(.+)$", t)
-        if m2 and ("用完" in t or "跳过" in t):
-            out.append("ℹ️ 抽奖：%s" % m2.group(1).strip())
+        # 次数用完 / 跳过 → 统一「今日未中奖」，不露状态词
+        if ("抽奖" in t and ("用完" in t or "跳过" in t)):
+            out.append("ℹ️ 今日未中奖")
             continue
         # 积分变化
         m3 = re.search(r"积分\s*(\d+)\s*→\s*(\d+)", t)
@@ -996,7 +995,7 @@ async def do_lottery(uid, plat):
             blocks = ["【央视频抽奖 · 今日结果】"]
             for qq, vuid, rec in targets:
                 picked = _filter_own_lines(log, vuid)
-                txt = "\n".join(picked) if picked else "（本次无抽奖记录）"
+                txt = "\n".join(picked) if picked else "ℹ️ 今日未中奖"
                 if any("次：" in x for x in picked):
                     txt += LOT_TIP
                 blocks.append("· %s（%s）\n%s" % (rec.get("remark") or qq, vuid[:8], txt))
@@ -1040,7 +1039,7 @@ async def do_lottery(uid, plat):
     blocks = ["【央视频抽奖 · 结果】"]
     for qq, vuid, rec in targets:
         picked = _filter_own_lines(log, vuid)
-        txt = "\n".join(picked) if picked else "（无抽奖记录）"
+        txt = "\n".join(picked) if picked else "ℹ️ 今日未中奖"
         if any("次：" in x for x in picked):
             txt += LOT_TIP
         blocks.append("· %s（QQ %s / %s）\n%s" % (rec.get("remark") or qq, qq, vuid[:8], txt))

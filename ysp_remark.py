@@ -143,25 +143,81 @@ def _ck_uid(ck):
     return ""
 
 
+PENDING_TIMEOUT = 30   # 秒；扫完码 30 秒不回备注，自动按 QQ 号落地
+
+
 def pending_load():
+    """返回 {uid: state} 字典。兼容旧版单对象 {uid,...} → 自动包成字典。"""
     try:
-        return json.load(open(PENDING, encoding="utf-8"))
+        d = json.load(open(PENDING, encoding="utf-8"))
     except Exception:
         return {}
+    if not isinstance(d, dict):
+        return {}
+    if d.get("uid"):                       # 旧单对象
+        return {str(d["uid"]): d}
+    return {str(k): v for k, v in d.items() if isinstance(v, dict)}
 
 
-def pending_save(d):
+def _write_pending(d):
     try:
         json.dump(d or {}, open(PENDING, "w", encoding="utf-8"), ensure_ascii=False)
     except Exception:
         pass
 
 
-def pending_clear():
-    try:
-        if os.path.exists(PENDING): os.remove(PENDING)
-    except Exception:
-        pass
+def pending_save(state):
+    """按 uid 分槽保存，多人扫码互不覆盖。"""
+    d = pending_load()
+    uid = str(state.get("uid") or "")
+    if uid:
+        d[uid] = state
+    _write_pending(d)
+
+
+def pending_get(uid):
+    return pending_load().get(str(uid))
+
+
+def pending_clear(uid=None):
+    """不传 uid = 全清；传 uid = 只删这一槽(会话退出)。"""
+    if uid is None:
+        try:
+            if os.path.exists(PENDING): os.remove(PENDING)
+        except Exception:
+            pass
+        return
+    d = pending_load()
+    d.pop(str(uid), None)
+    _write_pending(d)
+
+
+def pending_sweep():
+    """扫一遍所有槽：超过 PENDING_TIMEOUT 秒的自动按 QQ 号 finalize。
+
+    返回 [(uid, 文案), ...] 供调用方(莹莹棒)逐条回复。
+    cron/任意消息进 main 时都调一次，保证不依赖用户再发消息。
+    """
+    import time as _t
+    d = pending_load()
+    now = _t.time()
+    done = []
+    for uid, st in list(d.items()):
+        try:
+            ts = float(st.get("ts") or 0)
+        except Exception:
+            ts = 0
+        if now - ts < PENDING_TIMEOUT:
+            continue
+        # 超时 → 默认 QQ 号落地；先删槽，防止并发重复 finalize
+        pending_clear(uid)
+        try:
+            msg = finalize(uid, st.get("plat") or "qq", st.get("ck", ""),
+                           st.get("vuid", ""), st.get("qid", ""), uid)
+            done.append((uid, msg))
+        except Exception as e:
+            done.append((uid, "⏰ 30 秒未回备注，已按 QQ 号自动落地，但写青龙失败：%s" % e))
+    return done
 
 
 def finalize(uid, plats, ck, vuid, qid, remark):

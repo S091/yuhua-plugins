@@ -13,7 +13,7 @@
 # [rule: ^央视频帮助$]
 # [title: 央视频助手]
 # [author: 羽化]
-# [version: 2.3.0]
+# [version: 2.3.1]
 # [description: 央视频扫码登录(自动写青龙变量+绑定QQ) + 抽奖查询 + 状态]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -864,17 +864,24 @@ def _filter_own_lines(log, vuserid):
         return extract_lottery(log)
 
 
+def _lot_is_win(result):
+    """真中奖: 含『抽奖 N 次：奖品』且不是状态词(已用完/未抽奖/异常)。"""
+    r = str(result or "").strip()
+    return (("次：" in r or "次:" in r) and "抽奖" in r
+            and "已用完" not in r and "未中奖" not in r
+            and "未抽奖" not in r and "异常" not in r)
+
+
 def _lot_fmt(result, pts):
-    """把 '结果文字' + '积分前→后' 拼成展示文本。"""
+    """中奖=显示奖品信息; 没中奖=「ℹ️ 今日未中奖」(统一口径)。"""
     result = str(result or "").strip()
-    if not result:
-        return None
+    if not _lot_is_win(result):
+        return "ℹ️ 今日未中奖"
     text = "🎁 %s" % result
     if pts and "→" in str(pts):
         a, b = str(pts).split("→", 1)
         text += "\n💰 积分 %s → %s" % (a.strip(), b.strip())
-    if "次：" in result:
-        text += LOT_TIP
+    text += LOT_TIP
     return text
 
 
@@ -919,7 +926,8 @@ def lot_for_account(name, vuid=""):
     for k in (str(name), str(vuid)):
         if k and k in mp:
             return mp[k]
-    return mp.get("__global__", (None, None))
+    # ★ 不再回退 __global__: 那是别人的中奖/旧值, 贴过来会「全都一样」
+    return None, None
 
 
 def _global_lottery_text():
@@ -966,7 +974,7 @@ async def do_lottery(uid, plat):
             name = rec.get("remark") or qq
             t, when = await asyncio.to_thread(lot_for_account, name, vuid)
             if not t:
-                t = "ℹ️ 今日抽奖次数已用完 / 本次无抽奖记录"
+                t = "ℹ️ 今日未中奖"
             blocks.append("· %s（%s）\n%s" % (name, vuid[:8], t))
         await reply("\n\n".join(blocks) + "\n\n（今天已跑过，不重复跑）", recall=False)
         return

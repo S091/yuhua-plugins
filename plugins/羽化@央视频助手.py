@@ -13,7 +13,7 @@
 # [rule: ^央视频帮助$]
 # [title: 央视频助手]
 # [author: 羽化]
-# [version: 2.2.1]
+# [version: 2.2.2]
 # [description: 央视频扫码登录(自动写青龙变量+绑定QQ) + 抽奖查询 + 状态]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -743,15 +743,16 @@ async def finalize_login(uid, plat, ck, vuid, qid, remark):
 
 
 REMARK_HINT = (
-    "✅ 扫码成功！先给这个账号起个备注吧\n"
-    "· 直接回复备注名（如「我的主号」「我妈的号」）\n"
-    "· 不想起名：发「回车 / 空白」即可，默认用你的 QQ 号\n"
+    "✅ 扫码成功！请【务必回一条消息】完成登录（不回不生效）\n"
+    "· 想备注：直接回名字（如「我的主号」「我妈的号」）\n"
+    "· 不备注：发「回车 / 空白」即可，默认用你的 QQ 号\n"
     "· 回复 q 取消本次登录（CK 不会写入青龙）\n"
-    "（备注确定后才会写入青龙并跑积分任务）"
+    "⏰ 30 秒内不回，会自动按你的 QQ 号完成登录\n"
+    "（备注/超时确定后才会写入青龙并跑积分任务）"
 )
 
 
-REMARK_TIMEOUT = 90   # 秒；没回备注就默认 QQ 号自动落地
+REMARK_TIMEOUT = 30   # 秒；与共享模块 PENDING_TIMEOUT 对齐（兜底已迁到莹莹棒）
 
 
 def cron_remark_timeout():

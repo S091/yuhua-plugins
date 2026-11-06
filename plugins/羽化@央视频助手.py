@@ -13,7 +13,7 @@
 # [rule: ^央视频帮助$]
 # [title: 央视频助手]
 # [author: 羽化]
-# [version: 2.2.2]
+# [version: 2.3.0]
 # [description: 央视频扫码登录(自动写青龙变量+绑定QQ) + 抽奖查询 + 状态]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -803,19 +803,14 @@ async def do_status(uid, plat):
     """管理员=总览全部账号；普通用户=看自己名下所有账号（多账号）。"""
     m = get_map()
 
-    def _lot_hint(vuid):
+    def _lot_hint(vuid, name=""):
         lot = lot_today(vuid)
         if lot:
             return "有记录 " + time.strftime("%H:%M", time.localtime(lot.get("ts") or 0))
-        # 回退读青龙全局变量（单账号兼容）
-        try:
-            raw = ql_get_var("YSP_LAST_LOTTERY") or ""
-            if str(raw).startswith(time.strftime("%Y-%m-%d")):
-                p = str(raw).split("|")
-                if len(p) >= 2 and "次：" in p[1]:
-                    return "有记录(全局)"
-        except Exception:
-            pass
+        # ★ 按账号名从青龙多行变量里取自己那条(不再贴别人的结果)
+        t, when = lot_for_account(name or vuid, vuid)
+        if t:
+            return "有记录 %s" % (when[11:16] if len(when) >= 16 else "")
         return "未抽"
 
     if _is_admin(uid):
@@ -827,7 +822,7 @@ async def do_status(uid, plat):
         for qq, vuid, rec in accs:
             blocks.append(
                 "· %s（QQ %s）\n  vuserid：%s\n  今日抽奖：%s\n  绑定：%s" % (
-                    rec.get("remark") or qq, qq, vuid, _lot_hint(vuid),
+                    rec.get("remark") or qq, qq, vuid, _lot_hint(vuid, rec.get("remark") or qq),
                     time.strftime("%m-%d %H:%M", time.localtime(rec.get("ts") or 0))))
         await reply("\n\n".join(blocks), recall=False)
         return
@@ -840,7 +835,7 @@ async def do_status(uid, plat):
     for vuid, rec in mine:
         blocks.append(
             "· 备注：%s\n  vuserid：%s\n  今日抽奖：%s\n  CK：%d 字符\n  绑定：%s" % (
-                rec.get("remark") or vuid, vuid, _lot_hint(vuid),
+                rec.get("remark") or vuid, vuid, _lot_hint(vuid, rec.get("remark") or vuid),
                 len(rec.get("ck") or ""),
                 time.strftime("%m-%d %H:%M", time.localtime(rec.get("ts") or 0))))
     await reply("\n\n".join(blocks), recall=False)
@@ -867,6 +862,64 @@ def _filter_own_lines(log, vuserid):
         return extract_lottery("\n".join(lines[bounds[0]:bounds[1]]))
     except Exception:
         return extract_lottery(log)
+
+
+def _lot_fmt(result, pts):
+    """把 '结果文字' + '积分前→后' 拼成展示文本。"""
+    result = str(result or "").strip()
+    if not result:
+        return None
+    text = "🎁 %s" % result
+    if pts and "→" in str(pts):
+        a, b = str(pts).split("→", 1)
+        text += "\n💰 积分 %s → %s" % (a.strip(), b.strip())
+    if "次：" in result:
+        text += LOT_TIP
+    return text
+
+
+def lot_map_today():
+    """读 YSP_LAST_LOTTERY → {账号名: (结构化文本, 时间)}。只留今天的。
+
+    新格式每行: 名|YYYY-MM-DD HH:MM|结果|积分前→后
+    旧单条: 时间|结果|积分 → 存到 '__global__' 键(兜底, 兼容老数据)
+    """
+    out = {}
+    try:
+        raw = ql_get_var("YSP_LAST_LOTTERY") or ""
+    except Exception:
+        return out
+    today = time.strftime("%Y-%m-%d")
+    for ln in str(raw).splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        p = ln.split("|")
+        if len(p) >= 3 and p[1].strip().startswith(today):
+            # 新格式
+            t = _lot_fmt(p[2], p[3] if len(p) > 3 else "")
+            if t:
+                out[p[0].strip()] = (t, p[1].strip())
+        elif len(p) >= 2 and p[0].strip().startswith(today):
+            # 旧单条: 时间|结果|积分
+            t = _lot_fmt(p[1], p[2] if len(p) > 2 else "")
+            if t:
+                out["__global__"] = (t, p[0].strip())
+    return out
+
+
+def lot_for_account(name, vuid=""):
+    """按账号取今天的抽奖结果。找不到返回 (None, None)。
+
+    匹配顺序: 备注名 → QQ号tag(历史) → vuserid → __global__ 兜底。
+    """
+    mp = lot_map_today()
+    if not mp:
+        return None, None
+    for k in (str(name), str(vuid)):
+        if k and k in mp:
+            return mp[k]
+    return mp.get("__global__", (None, None))
 
 
 def _global_lottery_text():
@@ -896,24 +949,26 @@ async def do_lottery(uid, plat):
     is_adm = _is_admin(uid)
     mine = my_accounts(m, uid)
 
-    # ① 优先：青龙变量里有今天的结果 → 按范围汇总返回
-    gtext, when = await asyncio.to_thread(_global_lottery_text)
-    if gtext:
+    # ① 优先：青龙变量里有今天的结果 → ★按账号各取各的那条(不再一条贴给所有人)
+    lmap = await asyncio.to_thread(lot_map_today)
+    if lmap:
         if is_adm:
             accs = all_accounts(m)
-            blocks = ["【央视频抽奖 · 全部账号】共 %d 个（管理员视角）" % len(accs)]
-            for qq, vuid, rec in accs:
-                blocks.append("· %s（QQ %s / %s）\n%s" % (
-                    rec.get("remark") or qq, qq, vuid[:8], gtext))
-            await reply("\n\n".join(blocks) + "\n\n时间：%s\n（今天已跑过，不重复跑）" % when, recall=False)
         else:
             if not mine:
                 await reply("你还没有绑定央视频账号。\n先发「央视频登录」扫码绑定。", recall=False)
                 return
-            blocks = ["【央视频抽奖 · 我的账号】共 %d 个" % len(mine)]
-            for vuid, rec in mine:
-                blocks.append("· %s（%s）\n%s" % (rec.get("remark") or vuid, vuid[:8], gtext))
-            await reply("\n\n".join(blocks) + "\n\n时间：%s\n（今天已跑过，不重复跑）" % when, recall=False)
+            accs = [(str(uid), v, r) for v, r in mine]
+        title = ("【央视频抽奖 · 全部账号】共 %d 个（管理员视角）" if is_adm
+                 else "【央视频抽奖 · 我的账号】共 %d 个") % len(accs)
+        blocks = [title]
+        for qq, vuid, rec in accs:
+            name = rec.get("remark") or qq
+            t, when = await asyncio.to_thread(lot_for_account, name, vuid)
+            if not t:
+                t = "ℹ️ 今日抽奖次数已用完 / 本次无抽奖记录"
+            blocks.append("· %s（%s）\n%s" % (name, vuid[:8], t))
+        await reply("\n\n".join(blocks) + "\n\n（今天已跑过，不重复跑）", recall=False)
         return
 
     # ② 青龙最新日志是今天跑的 → 按账号段提取

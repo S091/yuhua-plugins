@@ -42,7 +42,8 @@ import urllib.parse
 import urllib.request
 import urllib.error
 
-import middleware  # 羽化 SDK: sender / 配置
+import middleware  # 羽化 SDK: 配置读取(bucketGet)
+from sillygirl import sender  # 羽化 SDK: 消息对象(getContent/getUserId/reply/listen)
 
 # ---------------- 配置读取(本机 JSON 优先, 面板 bucket 兜底) ----------------
 CFG_FILE = "/data/plugins/.sgcc_config.json"

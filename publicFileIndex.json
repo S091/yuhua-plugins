@@ -60,5 +60,21 @@
     "public": true,
     "admin": false,
     "disable": false
+  },
+  "plugins/羽化@国网验证码.py": {
+    "id": "国网验证码助手",
+    "name": "国网验证码助手",
+    "title": "国网验证码助手",
+    "type": "python",
+    "path": "plugins/羽化@国网验证码.py",
+    "version": "v1.1",
+    "desc": "网上国网 QQ 对话式登录(两步输手机号/密码→同步青龙变量→跑一次) + 新设备校验收码(--send-sms/--code) + 风控码分类提示。半自动: 验证码在手机需发回QQ。★公开脱敏版: 青龙地址/OpenAPI凭据需按 .sgcc_config.json 自行配置。",
+    "rule": "国网登录|国网发码|国网状态|国网帮助|国网\\s*\\d{6}|\\d{6}",
+    "icon": "https://api.iconify.design/lucide:zap.svg",
+    "author": "羽化",
+    "class": "工具类",
+    "public": true,
+    "admin": false,
+    "disable": false
   }
 }

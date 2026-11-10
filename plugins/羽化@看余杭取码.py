@@ -202,15 +202,16 @@ async def main():
         await _reply("⏳ 正在发送短信验证码…")
         try:
             r = await asyncio.to_thread(_post_api, "v2/login/sendLoginCode", {"mobilePhone": phone})
-            # ★exe字节码: 发码成功(HTTP200)取 response["data"] 作流水号(全局 code),
-            #   业务 code 字段不参与判断(之前误判"1000"为失败)。data 可能是 str 或 dict。
+            # 成功判据: data 是 ASCII 流水号(不硬判业务 code —— exe原版只看HTTP200, huawei版看code==0, 未实测统一)
+            # 中文提示/失败消息会被 ASCII 校验挡下, 不会混进 serialNum 触发 latin-1
             dv = r.get("data") if isinstance(r, dict) else None
             sn = str(dv) if (dv is not None and not isinstance(dv, dict)) else ""
             if isinstance(dv, dict):
                 sn = str(dv.get("serialNum") or dv.get("data") or "")
             mmsg = str((r.get("message") or r.get("msg") or "") if isinstance(r, dict) else "")
-            if not sn and ("频繁" in mmsg or "失效" in mmsg):
-                await _reply("❌ 发码未成功: %s\n请稍等几分钟再发「看余杭登录」(别用旧验证码)。" % mmsg); return
+            if not sn or not sn.isascii():
+                await _reply("❌ 发码未成功: %s\n请稍等几分钟再发「看余杭登录」(别用旧验证码)。" %
+                             (mmsg or json.dumps(r, ensure_ascii=False)[:120])); return
             w = _load_wait(); w[uid] = {"phone": phone, "ts": time.time(), "sn": sn}; _save_wait(w)
             await _reply("📱 验证码已发%s, 把收到的 5 位数字直接发给我\n(5分钟内有效, 发 Q 取消)" %
                          ("(流水号已记录)" if sn else ""))
@@ -235,7 +236,6 @@ async def main():
                 await _reply("❌ 缺少发码流水号(serialNum), 请重新发「看余杭登录」。"); return
             payload = {"serialNum": sn, "code": sms}
             r = await asyncio.to_thread(_post_api, "v2/login/codeLogin", payload)
-            # ★exe字节码: 登录成功 token = response["data"](字符串本身)
             tok = ""
             if isinstance(r, dict):
                 dv = r.get("data")
@@ -245,6 +245,11 @@ async def main():
                     for k in ("token", "accessToken", "access_token", "userToken", "ticket"):
                         v = dv.get(k)
                         if v and isinstance(v, str) and len(v) > 8: tok = v; break
+            # 防御: 中文data(失败提示)被当token会触发 latin-1, 绝不往下走
+            if tok and not tok.isascii():
+                w.pop(uid, None); _save_wait(w)
+                await _reply("❌ 登录返回了非ASCII的data(疑似错误提示被当token), 接口原文:\n%s\n(已重置)" %
+                             json.dumps(r, ensure_ascii=False)[:300]); return
             if not tok:
                 w.pop(uid, None); _save_wait(w)
                 await _reply("❌ 没拿到 token, 接口返回:\n%s\n\n请求: serialNum=%s code=%s\n(已重置, 发「看余杭登录」重新来)" %
@@ -256,7 +261,9 @@ async def main():
             else:
                 await _reply("⚠️ 拿到 token 但写青龙失败:\n%s\n值: %s\n(可手动建变量)" % (msg, _mask(tok)))
         except Exception as ex:
-            await _reply("❌ 登录失败: %s" % str(ex)[:150])
+            import traceback
+            tb = traceback.format_exc(limit=6)
+            await _reply("❌ 登录失败: %s\n---定位---\n%s" % (str(ex)[:120], tb[-600:]))
         return
 
 asyncio.run(main())

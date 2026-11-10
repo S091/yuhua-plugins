@@ -50,7 +50,7 @@
     "title": "莹莹棒取码助手",
     "type": "python",
     "path": "plugins/羽化@莹莹棒取码助手.py",
-    "version": "v1.0.0",
+    "version": "v1.5",
     "desc": "微信登录/取码中转(扫码成功自动把当前QQ登记到莹莹棒 notifyQq)。失效通知由莹莹棒服务端统一推送，本插件不再做绑定/通知。<br>需自行配置 yyb_base / admin_qq。",
     "rule": "?",
     "priority": 9999,

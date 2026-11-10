@@ -2,7 +2,7 @@
 # [rule: ^看余杭登录$|^看余杭发码$|^看余杭状态$|^看余杭帮助$|^看余杭\s*\d{5}$|^\d{5}$]
 # [title: 看余杭取码助手]
 # [author: 羽化]
-# [version: 1.1]
+# [version: 1.2]
 # [description: 看余杭(app.eyh.cn) QQ对话式短信登录取token, 自动写入青龙 Look_at_Yuhang 变量]
 # [platform: qq,web]
 # [cron: * * * * *]

@@ -202,18 +202,18 @@ async def main():
         await _reply("⏳ 正在发送短信验证码…")
         try:
             r = await asyncio.to_thread(_post_api, "v2/login/sendLoginCode", {"mobilePhone": phone})
-            # 回包 {"code":"1000","data":...,"message":"..."}; code 非 0/200 视为失败, 不进等码(防拿旧码)
-            code = str(r.get("code") if isinstance(r, dict) else "")
+            # ★exe字节码: 发码成功(HTTP200)取 response["data"] 作流水号(全局 code),
+            #   业务 code 字段不参与判断(之前误判"1000"为失败)。data 可能是 str 或 dict。
+            dv = r.get("data") if isinstance(r, dict) else None
+            sn = str(dv) if (dv is not None and not isinstance(dv, dict)) else ""
+            if isinstance(dv, dict):
+                sn = str(dv.get("serialNum") or dv.get("data") or "")
             mmsg = str((r.get("message") or r.get("msg") or "") if isinstance(r, dict) else "")
-            if code and code not in ("0", "200"):
-                await _reply("❌ 发码失败[%s]: %s\n请稍等几分钟再发「看余杭登录」(别用旧验证码)。" % (code, mmsg)); return
-            # 发码成功: 记下回包 data, 供 codeLogin 回传(会话绑定)
-            d = r.get("data") if isinstance(r, dict) else {}
-            sn = ""
-            if isinstance(d, dict):
-                sn = str(d.get("serialNum") or d.get("serialNo") or d.get("sessionId") or "")
+            if not sn and ("频繁" in mmsg or "失效" in mmsg):
+                await _reply("❌ 发码未成功: %s\n请稍等几分钟再发「看余杭登录」(别用旧验证码)。" % mmsg); return
             w = _load_wait(); w[uid] = {"phone": phone, "ts": time.time(), "sn": sn}; _save_wait(w)
-            await _reply("📱 验证码已发, 把收到的 5 位数字直接发给我\n(5分钟内有效, 发 Q 取消)")
+            await _reply("📱 验证码已发%s, 把收到的 5 位数字直接发给我\n(5分钟内有效, 发 Q 取消)" %
+                         ("(流水号已记录)" if sn else ""))
         except Exception as ex:
             await _reply("❌ 发码失败: %s" % str(ex)[:120])
         return
@@ -228,29 +228,23 @@ async def main():
             await _reply("⏰ 没有进行中的登录(或已超5分钟)。发「看余杭登录」重新来。"); return
         await _reply("⏳ 正在用验证码换 token…")
         try:
-            sn = st.get("sn") or "333"
-            # ★原版 exe 反编译定死: codeLogin 的 data = {"serialNum":"333","code":验证码}
-            # 没有 mobilePhone / smsCode 字段(之前写错导致"验证码失效")
+            sn = st.get("sn") or ""
+            # ★exe字节码: 登录 data={"serialNum": 发码响应data, "code": 短信验证码}
+            if not sn:
+                w.pop(uid, None); _save_wait(w)
+                await _reply("❌ 缺少发码流水号(serialNum), 请重新发「看余杭登录」。"); return
             payload = {"serialNum": sn, "code": sms}
             r = await asyncio.to_thread(_post_api, "v2/login/codeLogin", payload)
+            # ★exe字节码: 登录成功 token = response["data"](字符串本身)
             tok = ""
             if isinstance(r, dict):
                 dv = r.get("data")
-                # 原版: token： + response["data"](data 可能是字符串 token 本身)
                 if isinstance(dv, str) and len(dv) > 8 and " " not in dv.strip():
                     tok = dv.strip()
-                d = dv if isinstance(dv, dict) else {}
-                if not tok:
-                    for src in (r, d):
-                        for k in ("token", "accessToken", "access_token", "userToken", "ticket"):
-                            v = src.get(k)
-                            if v and isinstance(v, str) and len(v) > 8:
-                                tok = v; break
-                        if tok: break
-                    if not tok and isinstance(d.get("data"), dict):
-                        inner = d["data"]
-                        for k in ("token", "accessToken", "access_token"):
-                            if inner.get(k): tok = inner[k]; break
+                elif isinstance(dv, dict):
+                    for k in ("token", "accessToken", "access_token", "userToken", "ticket"):
+                        v = dv.get(k)
+                        if v and isinstance(v, str) and len(v) > 8: tok = v; break
             if not tok:
                 w.pop(uid, None); _save_wait(w)
                 await _reply("❌ 没拿到 token, 接口返回:\n%s\n\n请求: serialNum=%s code=%s\n(已重置, 发「看余杭登录」重新来)" %

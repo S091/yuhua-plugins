@@ -2,7 +2,7 @@
 # [rule: ^看余杭登录$|^看余杭发码$|^看余杭状态$|^看余杭帮助$|^看余杭\s*\d{5}$|^\d{5}$]
 # [title: 看余杭取码助手]
 # [author: 羽化]
-# [version: 1.3]
+# [version: 1.4]
 # [description: 看余杭(app.eyh.cn) QQ对话式短信登录取token, 自动写入青龙 Look_at_Yuhang 变量]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -120,27 +120,41 @@ def _envs(token):
     return {str(e.get("name")): e for e in d if isinstance(e, dict)}
 
 def _write_qinglong_env(name, value):
-    """有则 PUT 更新/无则 POST 新建, 带原值留底。返回 (ok, msg)。"""
+    """追加式: 读旧值按 & 拆 + 新token去重追加, 带原值留底。返回 (ok, msg, count)。
+    脚本 看余杭.py 按 & / 换行 split, 每段整串当 token; 备注只写 remarks 不进 value。
+    """
     tok = _token()
     es = _envs(tok)
     e = es.get(name)
     backup = {}
+    old = str(e.get("value") or "") if e else ""
+    backup = {"id": e.get("id") if e else None, "value": old,
+              "remarks": str(e.get("remarks") or "") if e else ""}
+    # 拆旧值(& 优先, 否则换行), 去空; 新 token 不在其中才追加(幂等)
+    parts = [p.strip() for p in (old.replace("\n", "&").split("&") if old else []) if p.strip()]
+    existed = value in parts
+    if not existed:
+        parts.append(value)
+    newval = "&".join(parts)
+    cnt = len(parts)
+    import datetime
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    remarks = "看余杭 共%d个号 / 最后登录 %s%s" % (cnt, stamp, " (本次已存在,未重复加)" if existed else "")
     if e:
-        backup = {"id": e.get("id"), "value": str(e.get("value") or ""),
-                  "remarks": str(e.get("remarks") or "")}
         r = _api("PUT", "/open/envs",
-                 {"id": e.get("id"), "name": name, "value": value,
-                  "remarks": e.get("remarks") or ""}, token=tok)
+                 {"id": e.get("id"), "name": name, "value": newval,
+                  "remarks": remarks}, token=tok)
         ok = r.get("code") == 200
     else:
         r = _api("POST", "/open/envs",
-                 [{"name": name, "value": value, "remarks": "看余杭token(羽化助手自动写入)"}], token=tok)
+                 [{"name": name, "value": newval, "remarks": remarks}], token=tok)
         ok = r.get("code") == 200
     try:
         json.dump({"at": time.time(), "name": name, "backup": backup},
                   open(ENV_BACKUP,"w",encoding="utf-8"), ensure_ascii=False)
     except Exception: pass
-    return ok, ("✓ 已更新" if e else "✓ 已新建") + " 青龙变量 " + name
+    tail = "已存在%d个号(未重复加)" % cnt if existed else "已追加, 现共%d个号" % cnt
+    return ok, (("✓ 已更新" if e else "✓ 已新建") + " 青龙变量 " + name + "; " + tail), cnt
 
 # ---------------- 羽化 SDK 封装 ----------------
 async def _get(fn):
@@ -254,12 +268,12 @@ async def main():
                 w.pop(uid, None); _save_wait(w)
                 await _reply("❌ 没拿到 token, 接口返回:\n%s\n\n请求: serialNum=%s code=%s\n(已重置, 发「看余杭登录」重新来)" %
                              (json.dumps(r, ensure_ascii=False)[:400], sn, sms)); return
-            ok, msg = await asyncio.to_thread(_write_qinglong_env, ENV_NAME(), tok)
+            ok, msg, cnt = await asyncio.to_thread(_write_qinglong_env, ENV_NAME(), tok)
             w.pop(uid, None); _save_wait(w)
             if ok:
-                await _reply("✅ 看余杭登录成功!\n%s\n值: %s\n去青龙启用任务 2375 即可(当前禁用)" % (msg, _mask(tok)))
+                await _reply("✅ 看余杭登录成功! 现共 %d 个号\n%s\n本次token: %s" % (cnt, msg, _mask(tok)))
             else:
-                await _reply("⚠️ 拿到 token 但写青龙失败:\n%s\n值: %s\n(可手动建变量)" % (msg, _mask(tok)))
+                await _reply("⚠️ 拿到 token 但写青龙失败:\n%s\n本次token: %s\n(可手动建变量)" % (msg, _mask(tok)))
         except Exception as ex:
             import traceback
             tb = traceback.format_exc(limit=6)

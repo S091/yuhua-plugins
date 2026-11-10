@@ -1,8 +1,8 @@
 # [public: true]
-# [rule: ^看余杭登录$|^看余杭发码$|^看余杭状态$|^看余杭帮助$|^看余杭\s*\d{4,6}$|^\d{4,6}$]
+# [rule: ^看余杭登录$|^看余杭发码$|^看余杭状态$|^看余杭帮助$|^看余杭\s*\d{5}$|^\d{5}$]
 # [title: 看余杭取码助手]
 # [author: 羽化]
-# [version: 1.0]
+# [version: 1.1]
 # [description: 看余杭(app.eyh.cn) QQ对话式短信登录取token, 自动写入青龙 Look_at_Yuhang 变量]
 # [platform: qq,web]
 # [cron: * * * * *]
@@ -168,7 +168,7 @@ async def _reply(text):
     except Exception: pass
 
 def _phone_ok(s): return bool(re.fullmatch(r"1[3-9]\d{9}", s or ""))
-def _code_ok(s): return bool(re.fullmatch(r"\d{4,6}", s or ""))
+def _code_ok(s): return bool(re.fullmatch(r"\d{5}", s or ""))
 def _mask(v): return (v[:6] + "…" + v[-4:]) if v and len(v) > 12 else ("(空)" if not v else "***")
 
 async def main():
@@ -202,18 +202,24 @@ async def main():
         await _reply("⏳ 正在发送短信验证码…")
         try:
             r = await asyncio.to_thread(_post_api, "v2/login/sendLoginCode", {"mobilePhone": phone})
-            # 回包结构 {"code":"1000","data":null,"message":"..."}; 成功码未知, 不硬判, 一律提示+继续等码
+            # 回包 {"code":"1000","data":...,"message":"..."}; code 非 0/200 视为失败, 不进等码(防拿旧码)
             code = str(r.get("code") if isinstance(r, dict) else "")
             mmsg = str((r.get("message") or r.get("msg") or "") if isinstance(r, dict) else "")
-            note = ("⚠️ 发码返回[%s]: %s\n" % (code, mmsg)) if (code and code not in ("0","200")) else ""
-            w = _load_wait(); w[uid] = {"phone": phone, "ts": time.time()}; _save_wait(w)
-            await _reply(note + "📱 若已收到短信, 把验证码直接发给我, 或发「看余杭 123456」\n(5分钟内有效, 发 Q 取消)")
+            if code and code not in ("0", "200"):
+                await _reply("❌ 发码失败[%s]: %s\n请稍等几分钟再发「看余杭登录」(别用旧验证码)。" % (code, mmsg)); return
+            # 发码成功: 记下回包 data, 供 codeLogin 回传(会话绑定)
+            d = r.get("data") if isinstance(r, dict) else {}
+            sn = ""
+            if isinstance(d, dict):
+                sn = str(d.get("serialNum") or d.get("serialNo") or d.get("sessionId") or "")
+            w = _load_wait(); w[uid] = {"phone": phone, "ts": time.time(), "sn": sn}; _save_wait(w)
+            await _reply("📱 验证码已发, 把收到的 5 位数字直接发给我\n(5分钟内有效, 发 Q 取消)")
         except Exception as ex:
             await _reply("❌ 发码失败: %s" % str(ex)[:120])
         return
 
     # ---- 收到验证码 ----
-    m = re.match(r"^看余杭\s*(\d{4,6})$", content) or re.match(r"^(\d{4,6})$", content)
+    m = re.match(r"^看余杭\s*(\d{5})$", content) or re.match(r"^(\d{5})$", content)
     if m:
         sms = m.group(1)
         w = _load_wait(); st = w.get(uid) or {}
@@ -222,24 +228,33 @@ async def main():
             await _reply("⏰ 没有进行中的登录(或已超5分钟)。发「看余杭登录」重新来。"); return
         await _reply("⏳ 正在用验证码换 token…")
         try:
-            r = await asyncio.to_thread(_post_api, "v2/login/codeLogin",
-                                        {"mobilePhone": phone, "smsCode": sms, "serialNum": "333"})
+            sn = st.get("sn") or "333"
+            # ★原版 exe 反编译定死: codeLogin 的 data = {"serialNum":"333","code":验证码}
+            # 没有 mobilePhone / smsCode 字段(之前写错导致"验证码失效")
+            payload = {"serialNum": sn, "code": sms}
+            r = await asyncio.to_thread(_post_api, "v2/login/codeLogin", payload)
             tok = ""
             if isinstance(r, dict):
-                d = r.get("data") if isinstance(r.get("data"), dict) else {}
-                # token 可能在顶层 / data.token / data 各种命名
-                for src in (r, d):
-                    for k in ("token", "accessToken", "access_token", "userToken", "ticket"):
-                        v = src.get(k)
-                        if v and isinstance(v, str) and len(v) > 8:
-                            tok = v; break
-                    if tok: break
-                if not tok and isinstance(d.get("data"), dict):
-                    inner = d["data"]
-                    for k in ("token", "accessToken", "access_token"):
-                        if inner.get(k): tok = inner[k]; break
+                dv = r.get("data")
+                # 原版: token： + response["data"](data 可能是字符串 token 本身)
+                if isinstance(dv, str) and len(dv) > 8 and " " not in dv.strip():
+                    tok = dv.strip()
+                d = dv if isinstance(dv, dict) else {}
+                if not tok:
+                    for src in (r, d):
+                        for k in ("token", "accessToken", "access_token", "userToken", "ticket"):
+                            v = src.get(k)
+                            if v and isinstance(v, str) and len(v) > 8:
+                                tok = v; break
+                        if tok: break
+                    if not tok and isinstance(d.get("data"), dict):
+                        inner = d["data"]
+                        for k in ("token", "accessToken", "access_token"):
+                            if inner.get(k): tok = inner[k]; break
             if not tok:
-                await _reply("❌ 没拿到 token, 接口返回:\n%s" % json.dumps(r, ensure_ascii=False)[:300]); return
+                w.pop(uid, None); _save_wait(w)
+                await _reply("❌ 没拿到 token, 接口返回:\n%s\n\n请求: serialNum=%s code=%s\n(已重置, 发「看余杭登录」重新来)" %
+                             (json.dumps(r, ensure_ascii=False)[:400], sn, sms)); return
             ok, msg = await asyncio.to_thread(_write_qinglong_env, ENV_NAME(), tok)
             w.pop(uid, None); _save_wait(w)
             if ok:

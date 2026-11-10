@@ -16,7 +16,7 @@
 # [param: {"required":false,"key":"yyb_bind.qr_recall","bool":false,"placeholder":"0","name":"二维码是否撤回(0不撤/1撤回)","desc":"登录二维码消息是否跟着自动撤回；默认0不撤，方便慢慢扫"}
 # [param: {"required":false,"key":"yyb_bind.login_source","bool":false,"placeholder":"1","name":"默认登录渠道","desc":"1=应用宝 2=手游助手 3=微信小程序；「取码」按此渠道直出，「微信登录」会发菜单让你选"}]
 # [param: {"required":false,"key":"yyb_bind.qr_valid_min","bool":false,"placeholder":"5","name":"二维码有效期(分钟)","desc":"仅用于提示文案；实际过期以微信服务端返回为准"}]
-# [param: {"required":false,"key":"yyb_bind.yyb_base","bool":false,"placeholder":"http://127.0.0.1:18273","name":"莹莹棒地址","desc":"取码服务的基础地址"}]
+# [param: {"required":false,"key":"yyb_bind.yyb_base","bool":false,"placeholder":"http://填你的NAS地址:18273","name":"莹莹棒地址","desc":"取码服务的基础地址"}]
 # [param: {"required":false,"key":"yyb_bind.admin_qq","bool":false,"placeholder":"留空=不限","name":"管理员QQ","desc":"允许改配置的QQ号，多个用逗号分隔；留空则所有人可改"}]
 # [param: {"required":false,"key":"yyb_bind.map","bool":false,"placeholder":"{\"openid或昵称\": {\"qq\": \"123456\", \"nick\": \"孙\"}}","name":"账号绑定表(JSON)","desc":"账号→QQ 的绑定关系，也可用QQ指令「设置绑定 昵称=QQ号」自动写入"}]
 # [cron: * * * * *]
@@ -63,7 +63,7 @@ DEFAULTS = {
     "cmd_bind": "我的绑定,查绑定",
     "notify_text": "【莹莹棒掉线提醒】账号 {nick} 已掉线，回复 微信登录 可获取登录二维码重新扫码。",
     "qr_valid_min": "5",
-    "yyb_base": "http://127.0.0.1:18273",
+    "yyb_base": "http://填你的NAS地址:18273",
     "admin_qq": "填你的QQ号",
     "login_source": "1",
     "recall_minutes": "1",
@@ -188,7 +188,7 @@ def stop_login(session_id):
 
 def onebot_send_private(user_id, message):
     """零依赖连 NapCat OneBot 正向 WS 发私聊。2026-11-05 实测可用。"""
-    host, port = "127.0.0.1", 3001
+    host, port = "填你的NAS地址", 3001
     s = socket.socket()
     s.settimeout(6)
     try:
@@ -289,7 +289,7 @@ def _q_save(lst):
 
 def onebot_delete_msg(message_id):
     """原生 socket WS 调 NapCat delete_msg。返回 True=服务器确认成功。"""
-    host, port = "127.0.0.1", 3001
+    host, port = "填你的NAS地址", 3001
     try:
         mid = int(str(message_id).strip())
     except Exception:

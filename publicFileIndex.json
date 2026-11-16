@@ -92,5 +92,21 @@
   "public": true,
   "admin": false,
   "disable": false
+ },
+ "plugins/羽化@淘宝登录取CK.py": {
+  "id": "淘宝登录取CK",
+  "name": "淘宝登录取CK",
+  "title": "淘宝登录取CK",
+  "type": "python",
+  "path": "plugins/羽化@淘宝登录取CK.py",
+  "version": "v1.0",
+  "desc": "QQ对话式淘宝闪购/饿了么短信登录取CK → 自动提交18275淘宝CK管理(备注=手机号, 归属QQ)。发『淘宝登录』→按提示发手机号→收到验证码发回, 自动取8域完整CK入库。需自配 tbdl.browser(浏览器容器:7788)/tbdl.ck_base(18275)/tbdl.ck_token(提交令牌)。退出发 q(各插件各退各的)。",
+  "rule": "^淘宝登录$|^淘宝登录状态$|^淘宝登录帮助$",
+  "icon": "https://api.iconify.design/lucide:shopping-bag.svg",
+  "author": "hermes",
+  "class": "工具类",
+  "public": true,
+  "admin": false,
+  "disable": false
  }
 }
